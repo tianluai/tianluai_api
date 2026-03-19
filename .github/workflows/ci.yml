@@ -32,6 +32,20 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand({ ping: 1 })' --quiet"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MONGODB_URI: mongodb://127.0.0.1:27017/tianluai_ci_test
+      CORS_ORIGIN: http://localhost:3000
+      CLERK_JWT_KEY: "-----BEGIN PUBLIC KEY-----\nCI_TEST_KEY\n-----END PUBLIC KEY-----"
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -41,6 +55,15 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      - name: Wait for MongoDB
+        run: |
+          for i in {1..30}; do
+            (echo > /dev/tcp/127.0.0.1/27017) >/dev/null 2>&1 && exit 0
+            echo "Waiting for MongoDB..."
+            sleep 2
+          done
+          echo "MongoDB did not become ready in time"
+          exit 1
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: pnpm test:e2e
