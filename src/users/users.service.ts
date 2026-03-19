@@ -13,15 +13,13 @@ export class UsersService {
     clerkId: string,
     data: { email?: string; name?: string },
   ): Promise<User> {
-    let user = await this.userModel.findOne({ clerkId }).exec();
-    if (!user) {
-      user = await this.userModel.create({
-        clerkId,
-        email: data.email,
-        name: data.name,
-      });
-    }
-    return user;
+    const user = await this.userModel.findOne({ clerkId }).exec();
+    if (user) return user;
+    return this.userModel.create({
+      clerkId,
+      email: data.email,
+      name: data.name,
+    });
   }
 
   async findById(id: string): Promise<User | null> {

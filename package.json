@@ -21,6 +21,9 @@
   },
   "dependencies": {
     "@clerk/backend": "^1.21.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "@sentry/node": "^9.0.0",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^3.3.0",
     "@nestjs/core": "^11.0.1",
