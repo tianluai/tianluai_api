@@ -2,21 +2,21 @@ import { Transform, type TransformFnParams } from 'class-transformer';
 import { IsNotEmpty, IsString, MinLength } from 'class-validator';
 
 function isStringDecorator(): PropertyDecorator {
-  return IsString();
+  return IsString() as unknown as PropertyDecorator;
 }
 
 function isNotEmptyDecorator(): PropertyDecorator {
-  return IsNotEmpty();
+  return IsNotEmpty() as unknown as PropertyDecorator;
 }
 
 function minLengthDecorator(min: number, message: string): PropertyDecorator {
-  return MinLength(min, { message });
+  return MinLength(min, { message }) as unknown as PropertyDecorator;
 }
 
 function transformDecorator(
   transformFn: (params: TransformFnParams) => unknown,
 ): PropertyDecorator {
-  return Transform(transformFn);
+  return Transform(transformFn) as unknown as PropertyDecorator;
 }
 
 export class CreateWorkspaceDto {
