@@ -10,6 +10,6 @@ import { ClerkAuthStrategy } from './strategies/clerk-auth.strategy';
     { provide: AUTH_STRATEGY, useClass: ClerkAuthStrategy },
     AuthGuard,
   ],
-  exports: [AuthGuard],
+  exports: [AuthGuard, AUTH_STRATEGY],
 })
 export class AuthModule {}

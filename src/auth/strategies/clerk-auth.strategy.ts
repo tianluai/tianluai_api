@@ -19,9 +19,11 @@ export class ClerkAuthStrategy implements IAuthStrategy {
 
     const jwtKeyRaw = this.config.get<string>('CLERK_JWT_KEY');
     const jwtKey = jwtKeyRaw?.replace(/\\n/g, '\n') ?? null;
-    if (!jwtKey) {
+    const secretKey = this.config.get<string>('CLERK_SECRET_KEY') ?? null;
+
+    if (!jwtKey && !secretKey) {
       throw new UnauthorizedException(
-        'Server auth not configured (set CLERK_JWT_KEY)',
+        'Server auth not configured (set CLERK_JWT_KEY or CLERK_SECRET_KEY)',
       );
     }
 
@@ -37,7 +39,7 @@ export class ClerkAuthStrategy implements IAuthStrategy {
 
     try {
       const result = await verifyToken(token, {
-        jwtKey,
+        ...(jwtKey ? { jwtKey } : { secretKey: secretKey! }),
         ...(authorizedParties.length > 0 && { authorizedParties }),
       });
 
