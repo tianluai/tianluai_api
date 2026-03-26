@@ -1,5 +1,6 @@
 import { Controller, Get } from '@nestjs/common';
 import { AppService } from './app.service';
+import { version } from '../package.json';
 
 @Controller()
 export class AppController {
@@ -12,6 +13,6 @@ export class AppController {
 
   @Get('health')
   health() {
-    return { status: 'ok', timestamp: new Date().toISOString() };
+    return { status: 'ok', version, timestamp: new Date().toISOString() };
   }
 }
