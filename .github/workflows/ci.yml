@@ -24,7 +24,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
-      - run: pnpm exec prettier --check "src/**/*.ts" "test/**/*.ts"
+      - run: pnpm format:check
 
   test:
     runs-on: ubuntu-latest
