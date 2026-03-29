@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: write
+
 env:
   DOCR_REGISTRY: ${{ secrets.DOCR_REGISTRY }}
   K8S_DEVOPS_REPO: tianluai/kubernetes-devops
@@ -82,8 +85,6 @@ jobs:
       version: ${{ steps.bump.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GH_PAT_DEVOPS_TOKEN }}
       - id: bump
         run: |
           CURRENT=$(node -p "require('./package.json').version")
@@ -101,12 +102,20 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     needs: [version-bump]
+    env:
+      DOCR_REGISTRY: ${{ secrets.DOCR_REGISTRY }}
     outputs:
       image-tag: ${{ needs.version-bump.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
+      - name: Require DOCR_REGISTRY secret
+        run: |
+          if [ -z "$DOCR_REGISTRY" ]; then
+            echo "::error::Add repository secret DOCR_REGISTRY on tianluai_api (same value as tianluai-web), e.g. registry.digitalocean.com/your-registry-name"
+            exit 1
+          fi
       - uses: digitalocean/action-doctl@v2
         with:
           token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
@@ -133,6 +142,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [docker, version-bump]
     if: github.ref == 'refs/heads/main'
+    concurrency:
+      group: k8s-dispatch-backend-prod
+      cancel-in-progress: true
     steps:
       - uses: peter-evans/repository-dispatch@v3
         with:
