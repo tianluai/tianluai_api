@@ -1,5 +1,4 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { verifyToken } from '@clerk/backend';
 import { Request } from 'express';
 import type { AuthPayload } from '../auth.types';
@@ -7,8 +6,6 @@ import type { IAuthStrategy } from '../auth-strategy.interface';
 
 @Injectable()
 export class ClerkAuthStrategy implements IAuthStrategy {
-  constructor(private readonly config: ConfigService) {}
-
   async validate(request: Request): Promise<AuthPayload> {
     const token =
       request.headers.authorization?.replace(/^Bearer\s+/i, '') ?? null;
@@ -17,40 +14,21 @@ export class ClerkAuthStrategy implements IAuthStrategy {
       throw new UnauthorizedException('Missing or invalid authorization token');
     }
 
-    const jwtKeyRaw = this.config.get<string>('CLERK_JWT_KEY');
-    const jwtKey = jwtKeyRaw?.replace(/\\n/g, '\n') ?? null;
-    if (!jwtKey) {
+    const secretKey = process.env.CLERK_SECRET_KEY ?? '';
+
+    if (!secretKey) {
       throw new UnauthorizedException(
-        'Server auth not configured (set CLERK_JWT_KEY)',
+        'Server auth not configured (set CLERK_SECRET_KEY)',
       );
     }
 
-    const authorizedPartiesEnv = this.config.get<string>(
-      'CLERK_AUTHORIZED_PARTIES',
-    );
-    const authorizedParties = authorizedPartiesEnv
-      ? authorizedPartiesEnv
-          .split(',')
-          .map((party) => party.trim())
-          .filter(Boolean)
-      : [];
-
     try {
-      const result = await verifyToken(token, {
-        jwtKey,
-        ...(authorizedParties.length > 0 && { authorizedParties }),
-      });
+      const result: Record<string, unknown> = (await verifyToken(token, {
+        secretKey,
+      })) as Record<string, unknown>;
 
-      type PayloadShape = { sub?: string; sid?: string };
-      const raw = result as { data?: PayloadShape } | PayloadShape;
-      const payload: PayloadShape =
-        typeof raw === 'object' &&
-        raw !== null &&
-        'data' in raw &&
-        raw.data != null
-          ? raw.data
-          : (raw as PayloadShape);
-      const { sub, sid } = payload;
+      const sub = typeof result.sub === 'string' ? result.sub : undefined;
+      const sid = typeof result.sid === 'string' ? result.sid : undefined;
 
       if (!sub) {
         console.error('[ClerkAuthStrategy] No sub in result:', result);
