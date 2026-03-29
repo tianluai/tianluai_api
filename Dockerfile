@@ -31,4 +31,4 @@ COPY --from=build --chown=nestjs:nestjs /app/package.json ./
 USER nestjs
 EXPOSE 3001
 
-CMD ["node", "dist/main.js"]
+CMD ["node", "dist/src/main.js"]
