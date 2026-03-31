@@ -1,0 +1,164 @@
+name: Deploy production
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  DOCR_REGISTRY: ${{ secrets.DOCR_REGISTRY }}
+  K8S_DEVOPS_REPO: tianluai/kubernetes-devops
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm format:check
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand({ ping: 1 })' --quiet"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MONGODB_URI: mongodb://127.0.0.1:27017/tianluai_ci_test
+      CORS_ORIGIN: http://localhost:3000
+      CLERK_SECRET_KEY: sk_test_ci_placeholder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: |
+          for i in {1..30}; do
+            (echo > /dev/tcp/127.0.0.1/27017) >/dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          exit 1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+
+  build-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+  version-bump:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: [lint, test, build-check]
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: bump
+        run: |
+          CURRENT=$(node -p "require('./package.json').version")
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEW="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          node -e "const p=require('./package.json');p.version='${NEW}';require('fs').writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          echo "version=${NEW}" >> $GITHUB_OUTPUT
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git commit -m "chore: bump version to v${{ steps.bump.outputs.version }}"
+          git pull --rebase origin main
+          git push
+
+  docker:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: [version-bump]
+    environment: prod
+    env:
+      DOCR_REGISTRY: ${{ secrets.DOCR_REGISTRY }}
+    outputs:
+      image-tag: ${{ needs.version-bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Require DOCR_REGISTRY secret
+        run: |
+          if [ -z "$DOCR_REGISTRY" ]; then
+            echo "::error::Add repository secret DOCR_REGISTRY on tianluai_api (same value as tianluai-web), e.g. registry.digitalocean.com/your-registry-name"
+            exit 1
+          fi
+      - uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - run: doctl registry login --expiry-seconds 1200
+      - uses: docker/setup-buildx-action@v3
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCR_REGISTRY }}/tianluai-api
+          tags: |
+            type=raw,value=${{ needs.version-bump.outputs.version }}
+            type=sha,prefix=
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: [docker, version-bump]
+    concurrency:
+      group: k8s-dispatch-backend-prod
+      cancel-in-progress: true
+    steps:
+      - uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GH_PAT_DEVOPS_TOKEN }}
+          repository: ${{ env.K8S_DEVOPS_REPO }}
+          event-type: deploy-backend
+          client-payload: |
+            {
+              "image": "${{ env.DOCR_REGISTRY }}/tianluai-api",
+              "tag": "${{ needs.version-bump.outputs.version }}",
+              "environment": "prod"
+            }

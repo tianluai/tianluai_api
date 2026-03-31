@@ -1,13 +1,13 @@
-name: Backend CI/CD
+name: Deploy staging
 
 on:
-  push:
-    branches: [main]
   pull_request:
-    branches: [main]
+    branches: [staging]
+  push:
+    branches: [staging]
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   DOCR_REGISTRY: ${{ secrets.DOCR_REGISTRY }}
@@ -77,40 +77,21 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
-  version-bump:
+  docker:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     needs: [lint, test, build-check]
-    if: github.event_name == 'push'
-    outputs:
-      version: ${{ steps.bump.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-      - id: bump
-        run: |
-          CURRENT=$(node -p "require('./package.json').version")
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-          NEW="${MAJOR}.${MINOR}.$((PATCH + 1))"
-          node -e "const p=require('./package.json');p.version='${NEW}';require('fs').writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
-          echo "version=${NEW}" >> $GITHUB_OUTPUT
-      - run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json
-          git commit -m "chore: bump version to v${{ steps.bump.outputs.version }}"
-          git pull --rebase origin main
-          git push
-
-  docker:
-    runs-on: ubuntu-latest
-    needs: [version-bump]
+    environment: staging
     env:
       DOCR_REGISTRY: ${{ secrets.DOCR_REGISTRY }}
     outputs:
-      image-tag: ${{ needs.version-bump.outputs.version }}
+      image-tag: ${{ steps.staging-tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: staging
+      - id: staging-tag
+        run: echo "tag=staging-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
       - name: Require DOCR_REGISTRY secret
         run: |
           if [ -z "$DOCR_REGISTRY" ]; then
@@ -127,9 +108,8 @@ jobs:
         with:
           images: ${{ env.DOCR_REGISTRY }}/tianluai-api
           tags: |
-            type=raw,value=${{ needs.version-bump.outputs.version }}
-            type=sha,prefix=
-            type=raw,value=latest
+            type=raw,value=${{ steps.staging-tag.outputs.tag }}
+            type=raw,value=staging-latest
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -140,11 +120,11 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    needs: [docker, version-bump]
-    if: github.ref == 'refs/heads/main'
+    needs: [docker]
     concurrency:
-      group: k8s-dispatch-backend-prod
+      group: k8s-dispatch-backend-staging
       cancel-in-progress: true
     steps:
       - uses: peter-evans/repository-dispatch@v3
@@ -155,6 +135,6 @@ jobs:
           client-payload: |
             {
               "image": "${{ env.DOCR_REGISTRY }}/tianluai-api",
-              "tag": "${{ needs.version-bump.outputs.version }}",
-              "environment": "prod"
+              "tag": "${{ needs.docker.outputs['image-tag'] }}",
+              "environment": "staging"
             }
