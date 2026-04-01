@@ -24,6 +24,15 @@ export class SentryExceptionFilter implements ExceptionFilter {
         ? exception.getResponse()
         : { message: 'Internal server error' };
 
+    // Nest will not log exceptions when a global filter handles them.
+    // Keep responses stable, but log in non-prod to aid debugging.
+    if (process.env.NODE_ENV !== 'production') {
+      const shouldLog = status >= 500 || !(exception instanceof HttpException);
+      if (shouldLog) {
+        console.error('[SentryExceptionFilter]', exception);
+      }
+    }
+
     response.status(status).json(message);
   }
 }
