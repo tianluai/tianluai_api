@@ -6,6 +6,7 @@ import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
+import { DriveModule } from './drive/drive.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { WorkspacesModule } from './workspaces/workspaces.module';
     AuthModule,
     UsersModule,
     WorkspacesModule,
+    DriveModule,
   ],
   controllers: [AppController],
   providers: [AppService],
