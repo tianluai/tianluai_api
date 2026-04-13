@@ -1,40 +1,52 @@
-import { Body, Controller, Get, Post, Query, Req, Res } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Post,
+  Query,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import type { Response } from 'express';
-import type { Request } from 'express';
+import { AuthGuard } from '../auth/auth.guard';
+import { ClerkUserId } from '../auth/clerk-user.decorator';
+import { WorkspacesService } from '../workspaces/workspaces.service';
 import { DriveAuthService } from './drive-auth.service';
+import { DriveAuthBodyDto } from './dto/drive-auth-body.dto';
+import { DriveSaveFoldersBodyDto } from './dto/drive-save-folders-body.dto';
+import {
+  DriveFoldersQueryDto,
+  DriveWorkspaceQueryDto,
+} from './dto/drive-workspace-query.dto';
 
 @Controller('drive')
 export class DriveController {
-  constructor(private readonly driveAuth: DriveAuthService) {}
+  constructor(
+    private readonly driveAuth: DriveAuthService,
+    private readonly workspaces: WorkspacesService,
+  ) {}
 
-  private getUserId(req: Request, explicit?: string): string {
-    const headerUserId = req.headers['x-user-id'];
-    if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
-    if (typeof headerUserId === 'string' && headerUserId.trim())
-      return headerUserId.trim();
-    return '';
-  }
-
-  private getWorkspaceId(req: Request, explicit?: string): string {
-    const headerWs = req.headers['x-workspace-id'];
-    if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
-    if (typeof headerWs === 'string' && headerWs.trim()) return headerWs.trim();
-    return '';
+  /** Ensures the authenticated user is an active member of the workspace (organization). */
+  private async ensureWorkspaceAccess(
+    clerkId: string,
+    workspaceId: string,
+  ): Promise<void> {
+    const workspace = await this.workspaces.getWorkspace(clerkId, workspaceId);
+    if (!workspace) {
+      throw new ForbiddenException('You do not have access to this workspace.');
+    }
   }
 
   @Get('status')
-  status(
-    @Req() req: Request,
-    @Query('userId') userId?: string,
-    @Query('workspaceId') workspaceId?: string,
+  @UseGuards(AuthGuard)
+  async status(
+    @ClerkUserId() clerkId: string,
+    @Query() query: DriveWorkspaceQueryDto,
   ) {
-    const resolvedUserId = this.getUserId(req, userId);
-    const resolvedWorkspaceId = this.getWorkspaceId(req, workspaceId);
+    await this.ensureWorkspaceAccess(clerkId, query.workspaceId);
     const driveConfigured = this.driveAuth.isConfigured();
-    const conn =
-      resolvedUserId && resolvedWorkspaceId
-        ? this.driveAuth.getConnection(resolvedUserId, resolvedWorkspaceId)
-        : null;
+    const conn = this.driveAuth.getConnection(clerkId, query.workspaceId);
     return {
       connected: !!conn,
       driveConfigured,
@@ -43,64 +55,49 @@ export class DriveController {
   }
 
   @Get('folders')
+  @UseGuards(AuthGuard)
   async listFolders(
-    @Req() req: Request,
-    @Query('userId') userId: string,
-    @Query('workspaceId') workspaceId: string,
-    @Query('parentId') parentId?: string,
+    @ClerkUserId() clerkId: string,
+    @Query() query: DriveFoldersQueryDto,
   ) {
-    const resolvedUserId = this.getUserId(req, userId);
-    const resolvedWorkspaceId = this.getWorkspaceId(req, workspaceId);
+    await this.ensureWorkspaceAccess(clerkId, query.workspaceId);
     return this.driveAuth.listFolders(
-      resolvedUserId,
-      resolvedWorkspaceId,
-      parentId ?? 'root',
+      clerkId,
+      query.workspaceId,
+      query.parentId,
     );
   }
 
   @Post('folders')
-  saveFolders(
-    @Req() req: Request,
-    @Body()
-    body: { userId?: string; workspaceId?: string; folderIds: string[] },
+  @UseGuards(AuthGuard)
+  async saveFolders(
+    @ClerkUserId() clerkId: string,
+    @Body() body: DriveSaveFoldersBodyDto,
   ) {
-    const resolvedUserId = this.getUserId(req, body?.userId);
-    const resolvedWorkspaceId = this.getWorkspaceId(req, body?.workspaceId);
-    const folderIds = Array.isArray(body?.folderIds)
-      ? body.folderIds.filter((id): id is string => typeof id === 'string')
-      : [];
+    await this.ensureWorkspaceAccess(clerkId, body.workspaceId);
     return this.driveAuth.saveSelectedFolders(
-      resolvedUserId,
-      resolvedWorkspaceId,
-      folderIds,
+      clerkId,
+      body.workspaceId,
+      body.folderIds,
     );
   }
 
   @Post('auth')
-  auth(
-    @Req() req: Request,
-    @Body() body: { userId?: string; workspaceId?: string; returnUrl?: string },
-  ) {
-    const resolvedUserId = this.getUserId(req, body?.userId);
-    const resolvedWorkspaceId = this.getWorkspaceId(req, body?.workspaceId);
-    const returnUrl = body.returnUrl || '';
-    if (!resolvedUserId || !resolvedWorkspaceId) {
-      return { authUrl: null, error: 'userId and workspaceId are required.' };
-    }
-    const authUrl = this.driveAuth.getAuthUrl(
-      returnUrl,
-      resolvedUserId,
-      resolvedWorkspaceId,
+  @UseGuards(AuthGuard)
+  async auth(@ClerkUserId() clerkId: string, @Body() body: DriveAuthBodyDto) {
+    await this.ensureWorkspaceAccess(clerkId, body.workspaceId);
+    const result = this.driveAuth.getAuthUrl(
+      body.returnUrl,
+      clerkId,
+      body.workspaceId,
     );
-    if (!authUrl)
-      return {
-        authUrl: null,
-        error:
-          'Google Drive is not configured. Ask your admin to set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.',
-      };
-    return { authUrl };
+    if ('error' in result) {
+      return { authUrl: null, error: result.error };
+    }
+    return { authUrl: result.authUrl };
   }
 
+  /** Google OAuth redirect — unauthenticated (browser follows redirect from Google). */
   @Get('callback')
   async callback(
     @Query('code') code: string,
@@ -108,14 +105,23 @@ export class DriveController {
     @Query('returnUrl') returnUrl: string | undefined,
     @Res() res: Response,
   ) {
-    if (!code || !state)
-      return res.redirect(302, '/documents?error=missing_params');
-    const result = await this.driveAuth.handleCallback(code, state, returnUrl);
-    if ('error' in result)
+    const base = this.driveAuth.getFrontendBaseUrl();
+    if (!code || !state) {
       return res.redirect(
         302,
-        `/documents?error=${encodeURIComponent(result.error)}`,
+        `${base}/documents?errorCode=oauth_missing_params`,
       );
-    return res.redirect(302, result.returnUrl || '/documents?connected=1');
+    }
+    const result = await this.driveAuth.handleCallback(code, state, returnUrl);
+    if ('errorCode' in result) {
+      return res.redirect(
+        302,
+        `${base}/documents?errorCode=${encodeURIComponent(result.errorCode)}`,
+      );
+    }
+    return res.redirect(
+      302,
+      result.returnUrl || `${base}/documents?connected=1`,
+    );
   }
 }

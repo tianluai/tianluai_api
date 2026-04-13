@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import * as Sentry from '@sentry/node';
 import { google } from 'googleapis';
 import type { drive_v3 } from 'googleapis';
+
+import { googleDriveClientErrorMessage } from './google-drive-client-error';
 
 const DRIVE_SCOPES = [
   'https://www.googleapis.com/auth/drive.readonly',
@@ -11,9 +14,81 @@ const DRIVE_SCOPES = [
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
+/** Returned by {@link DriveAuthService.getAuthUrl} when OAuth is not configured. */
+export const DRIVE_NOT_CONFIGURED_MESSAGE =
+  'Google Drive is not configured. Ask your admin to set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.';
+
+export type DriveAuthUrlResult = { authUrl: string } | { error: string };
+
+/** Shape encoded in the OAuth `state` query param (see `getAuthUrl`). */
+type OAuthCallbackState = {
+  userId: string;
+  workspaceId: string;
+  returnUrl?: string;
+};
+
+/** Stable codes for OAuth callback failures (use in redirect `errorCode` query param). */
+export const DRIVE_OAUTH_CALLBACK_ERROR_CODES = [
+  'oauth_missing_params',
+  'oauth_state_invalid',
+  'drive_not_configured',
+  'oauth_no_refresh_token',
+  'oauth_token_exchange_failed',
+] as const;
+
+export type DriveOAuthCallbackErrorCode =
+  (typeof DRIVE_OAUTH_CALLBACK_ERROR_CODES)[number];
+
+export type DriveOAuthCallbackResult =
+  | { returnUrl: string }
+  | { errorCode: DriveOAuthCallbackErrorCode };
+
+type DriveRefreshCredentials = {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: Date;
+};
+
+/** Return value of {@link DriveAuthService.getDriveForWorkspace}. */
+type DriveForWorkspaceResult = {
+  drive: drive_v3.Drive;
+  connKey: string;
+  conn: { selectedFolderIds: string[] };
+  refreshCredentials?: DriveRefreshCredentials;
+};
+
+function parseOAuthCallbackState(raw: unknown): OAuthCallbackState | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const candidate = raw as Partial<OAuthCallbackState>;
+  if (
+    typeof candidate.userId !== 'string' ||
+    typeof candidate.workspaceId !== 'string'
+  ) {
+    return null;
+  }
+  if (
+    candidate.returnUrl !== undefined &&
+    typeof candidate.returnUrl !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    userId: candidate.userId,
+    workspaceId: candidate.workspaceId,
+    returnUrl: candidate.returnUrl,
+  };
+}
+
 @Injectable()
 export class DriveAuthService {
-  constructor(private readonly config: ConfigService) {}
+  private readonly googleRedirectUri: string | undefined;
+  private readonly apiPublicUrl: string | undefined;
+  private readonly port: number;
+  private readonly googleClientId: string | undefined;
+  private readonly googleClientSecret: string | undefined;
+  private readonly frontendUrl: string;
 
   private readonly connections = new Map<
     string,
@@ -25,22 +100,29 @@ export class DriveAuthService {
     }
   >();
 
+  constructor(config: ConfigService) {
+    this.googleRedirectUri = config.get<string>('GOOGLE_REDIRECT_URI');
+    this.apiPublicUrl = config.get<string>('API_PUBLIC_URL');
+    this.port = Number(config.get('PORT', 4000));
+    this.googleClientId = config.get<string>('GOOGLE_CLIENT_ID');
+    this.googleClientSecret = config.get<string>('GOOGLE_CLIENT_SECRET');
+    this.frontendUrl =
+      config.get<string>('FRONTEND_URL') ?? 'http://localhost:3000';
+  }
+
   private scopeKey(userId: string, workspaceId: string): string {
     return `${userId}::${workspaceId}`;
   }
 
   private getRedirectUri(): string {
-    const uri = this.config.get<string>('GOOGLE_REDIRECT_URI');
-    if (uri) return uri;
-    const base =
-      this.config.get<string>('API_PUBLIC_URL') ||
-      `http://localhost:${this.config.get('PORT', 4000)}`;
+    if (this.googleRedirectUri) return this.googleRedirectUri;
+    const base = this.apiPublicUrl || `http://localhost:${this.port}`;
     return `${base}/drive/callback`;
   }
 
   private createOAuth2Client() {
-    const clientId = this.config.get<string>('GOOGLE_CLIENT_ID');
-    const clientSecret = this.config.get<string>('GOOGLE_CLIENT_SECRET');
+    const clientId = this.googleClientId;
+    const clientSecret = this.googleClientSecret;
     if (!clientId || !clientSecret) return null;
     return new google.auth.OAuth2(
       clientId,
@@ -50,90 +132,111 @@ export class DriveAuthService {
   }
 
   isConfigured(): boolean {
-    return !!(
-      this.config.get('GOOGLE_CLIENT_ID') &&
-      this.config.get('GOOGLE_CLIENT_SECRET')
-    );
+    return !!(this.googleClientId && this.googleClientSecret);
   }
 
+  /** Base URL for building post-OAuth redirects (e.g. `/documents?errorCode=…`). */
+  getFrontendBaseUrl(): string {
+    return this.frontendUrl.replace(/\/$/, '');
+  }
+
+  /**
+   * Builds the Google OAuth URL or an error message (e.g. Drive not configured).
+   * Callers must pass the authenticated user id (e.g. Clerk `sub`).
+   */
   getAuthUrl(
     returnUrl: string,
     userId: string,
     workspaceId: string,
-  ): string | null {
+  ): DriveAuthUrlResult {
     const client = this.createOAuth2Client();
-    if (!client) return null;
-    if (!userId || !workspaceId) return null;
+    if (!client) {
+      return { error: DRIVE_NOT_CONFIGURED_MESSAGE };
+    }
+    if (!userId?.trim() || !workspaceId?.trim()) {
+      return { error: 'userId and workspaceId are required.' };
+    }
     const state = Buffer.from(
       JSON.stringify({ returnUrl, userId, workspaceId }),
     ).toString('base64url');
-    return client.generateAuthUrl({
+    const authUrl = client.generateAuthUrl({
       access_type: 'offline',
       prompt: 'consent',
       scope: DRIVE_SCOPES,
       state,
     });
+    return { authUrl };
   }
 
   async handleCallback(
     code: string,
     state: string,
     returnUrlFromQuery?: string,
-  ): Promise<{ returnUrl: string } | { error: string }> {
+  ): Promise<DriveOAuthCallbackResult> {
     let payload: { returnUrl: string; userId: string; workspaceId: string };
     try {
       const raw: unknown = JSON.parse(
         Buffer.from(state, 'base64url').toString(),
       );
-      if (raw === null || typeof raw !== 'object') {
-        return { error: 'Invalid state' };
-      }
-      const o = raw as Record<string, unknown>;
-      if (
-        typeof o.userId !== 'string' ||
-        typeof o.workspaceId !== 'string' ||
-        (o.returnUrl !== undefined && typeof o.returnUrl !== 'string')
-      ) {
-        return { error: 'Invalid state' };
+      const parsed = parseOAuthCallbackState(raw);
+      if (parsed === null) {
+        Sentry.captureMessage(
+          'Drive OAuth callback: state payload failed validation',
+          {
+            level: 'warning',
+            tags: { feature: 'drive', operation: 'handle_callback' },
+            extra: { stateParamLength: state.length },
+          },
+        );
+        return { errorCode: 'oauth_state_invalid' };
       }
       payload = {
-        returnUrl: typeof o.returnUrl === 'string' ? o.returnUrl : '',
-        userId: o.userId,
-        workspaceId: o.workspaceId,
+        returnUrl: parsed.returnUrl ?? '',
+        userId: parsed.userId,
+        workspaceId: parsed.workspaceId,
       };
-    } catch {
-      return { error: 'Invalid state' };
+    } catch (cause: unknown) {
+      Sentry.captureException(cause, {
+        tags: { feature: 'drive', operation: 'handle_callback' },
+        extra: { step: 'decode_or_parse_oauth_state' },
+      });
+      return { errorCode: 'oauth_state_invalid' };
     }
     if (!payload.userId || !payload.workspaceId) {
-      return { error: 'Invalid state: missing user or workspace' };
+      return { errorCode: 'oauth_state_invalid' };
     }
-    const frontendUrl =
-      this.config.get<string>('FRONTEND_URL') || 'http://localhost:3000';
     const candidateReturnUrl = (
       returnUrlFromQuery ||
       payload.returnUrl ||
       ''
     ).trim();
-    const safeReturnUrl = candidateReturnUrl.startsWith(frontendUrl)
+    const safeReturnUrl = candidateReturnUrl.startsWith(this.frontendUrl)
       ? candidateReturnUrl
-      : `${frontendUrl}/documents?connected=1`;
+      : `${this.frontendUrl}/documents?connected=1`;
     const client = this.createOAuth2Client();
-    if (!client) return { error: 'Google Drive not configured' };
-    const { tokens } = await client.getToken(code);
-    if (!tokens.refresh_token)
-      return { error: 'No refresh token; try again and grant all permissions' };
-    const expiry = tokens.expiry_date
-      ? new Date(tokens.expiry_date)
-      : new Date(Date.now() + 3600 * 1000);
+    if (!client) return { errorCode: 'drive_not_configured' };
+    try {
+      const { tokens } = await client.getToken(code);
+      if (!tokens.refresh_token) return { errorCode: 'oauth_no_refresh_token' };
+      const expiry = tokens.expiry_date
+        ? new Date(tokens.expiry_date)
+        : new Date(Date.now() + 3600 * 1000);
 
-    const key = this.scopeKey(payload.userId, payload.workspaceId);
-    this.connections.set(key, {
-      accessToken: tokens.access_token ?? '',
-      refreshToken: tokens.refresh_token,
-      expiresAt: expiry,
-      selectedFolderIds: this.connections.get(key)?.selectedFolderIds ?? [],
-    });
-    return { returnUrl: safeReturnUrl };
+      const key = this.scopeKey(payload.userId, payload.workspaceId);
+      this.connections.set(key, {
+        accessToken: tokens.access_token ?? '',
+        refreshToken: tokens.refresh_token,
+        expiresAt: expiry,
+        selectedFolderIds: this.connections.get(key)?.selectedFolderIds ?? [],
+      });
+      return { returnUrl: safeReturnUrl };
+    } catch (cause: unknown) {
+      Sentry.captureException(cause, {
+        tags: { feature: 'drive', operation: 'handle_callback' },
+        extra: { step: 'oauth_token_exchange' },
+      });
+      return { errorCode: 'oauth_token_exchange_failed' };
+    }
   }
 
   getConnection(userId: string, workspaceId: string) {
@@ -174,46 +277,32 @@ export class DriveAuthService {
   async getDriveForWorkspace(
     userId: string,
     workspaceId: string,
-  ): Promise<{
-    drive: drive_v3.Drive;
-    connKey: string;
-    conn: { selectedFolderIds: string[] };
-    refreshCredentials?: {
-      accessToken: string;
-      refreshToken: string;
-      expiresAt: Date;
-    };
-  } | null> {
+  ): Promise<DriveForWorkspaceResult | null> {
     const conn = this.getConnection(userId, workspaceId);
     if (!conn) return null;
-    const result = await this.getOAuth2ClientForConnection(conn);
-    if (!result) return null;
-    const drive = google.drive({ version: 'v3', auth: result.client });
+    const authClientResult = await this.getOAuth2ClientForConnection(conn);
+    if (!authClientResult) return null;
+    const drive = google.drive({
+      version: 'v3',
+      auth: authClientResult.client,
+    });
     const connKey = this.scopeKey(userId, workspaceId);
-    const out: {
-      drive: drive_v3.Drive;
-      connKey: string;
-      conn: { selectedFolderIds: string[] };
-      refreshCredentials?: {
-        accessToken: string;
-        refreshToken: string;
-        expiresAt: Date;
-      };
-    } = {
+    const driveForWorkspace: DriveForWorkspaceResult = {
       drive,
       connKey,
       conn: { selectedFolderIds: conn.selectedFolderIds ?? [] },
     };
-    if (result.credentials) {
-      out.refreshCredentials = {
-        accessToken: result.credentials.access_token!,
-        refreshToken: result.credentials.refresh_token ?? conn.refreshToken,
-        expiresAt: result.credentials.expiry_date
-          ? new Date(result.credentials.expiry_date)
+    if (authClientResult.credentials) {
+      driveForWorkspace.refreshCredentials = {
+        accessToken: authClientResult.credentials.access_token!,
+        refreshToken:
+          authClientResult.credentials.refresh_token ?? conn.refreshToken,
+        expiresAt: authClientResult.credentials.expiry_date
+          ? new Date(authClientResult.credentials.expiry_date)
           : new Date(Date.now() + 3600 * 1000),
       };
     }
-    return out;
+    return driveForWorkspace;
   }
 
   async listFolders(
@@ -221,53 +310,42 @@ export class DriveAuthService {
     workspaceId: string,
     parentId: string,
   ): Promise<{ folders: { id: string; name: string }[]; error?: string }> {
-    const g = await this.getDriveForWorkspace(userId, workspaceId);
-    if (!g) return { folders: [], error: 'Google Drive not connected.' };
-    const q =
+    const driveForWorkspace = await this.getDriveForWorkspace(
+      userId,
+      workspaceId,
+    );
+    if (!driveForWorkspace) {
+      return { folders: [], error: 'Google Drive not connected.' };
+    }
+    const filesListQuery =
       parentId === 'root' || !parentId
         ? `mimeType = '${FOLDER_MIME}' and 'root' in parents and trashed = false`
         : `mimeType = '${FOLDER_MIME}' and '${parentId}' in parents and trashed = false`;
     try {
-      const res = await g.drive.files.list({
-        q,
+      const filesListResponse = await driveForWorkspace.drive.files.list({
+        q: filesListQuery,
         pageSize: 100,
         fields: 'files(id, name)',
         orderBy: 'name',
       });
-      if (g.refreshCredentials) {
-        const existing = this.connections.get(g.connKey);
+      if (driveForWorkspace.refreshCredentials) {
+        const existing = this.connections.get(driveForWorkspace.connKey);
         if (existing) {
-          this.connections.set(g.connKey, {
+          this.connections.set(driveForWorkspace.connKey, {
             ...existing,
-            accessToken: g.refreshCredentials.accessToken,
-            refreshToken: g.refreshCredentials.refreshToken,
-            expiresAt: g.refreshCredentials.expiresAt,
+            accessToken: driveForWorkspace.refreshCredentials.accessToken,
+            refreshToken: driveForWorkspace.refreshCredentials.refreshToken,
+            expiresAt: driveForWorkspace.refreshCredentials.expiresAt,
           });
         }
       }
-      const folders = (res.data.files ?? []).map((f) => ({
-        id: f.id!,
-        name: f.name ?? '(Unnamed)',
+      const folders = (filesListResponse.data.files ?? []).map((file) => ({
+        id: file.id!,
+        name: file.name ?? '(Unnamed)',
       }));
       return { folders };
-    } catch (err: unknown) {
-      const code = (err as { code?: number })?.code;
-      const reason = (err as { errors?: Array<{ reason?: string }> })
-        ?.errors?.[0]?.reason;
-      if (code === 403 || reason === 'accessNotConfigured') {
-        return {
-          folders: [],
-          error:
-            'Google Drive API is not enabled for this project. Enable it in Google Cloud Console: APIs & Services → Enable APIs → search "Google Drive API" → Enable. If you just enabled it, wait a minute and try again.',
-        };
-      }
-      const message = (err as { message?: string })?.message;
-      return {
-        folders: [],
-        error: message
-          ? String(message)
-          : 'Failed to list folders from Google Drive.',
-      };
+    } catch (error: unknown) {
+      return { folders: [], error: googleDriveClientErrorMessage(error) };
     }
   }
 
