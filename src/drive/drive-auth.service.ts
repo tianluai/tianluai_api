@@ -57,6 +57,12 @@ type DriveForWorkspaceResult = {
   refreshCredentials?: DriveRefreshCredentials;
 };
 
+export type DriveIndexableFile = {
+  id: string;
+  name: string;
+  mimeType: string;
+};
+
 function parseOAuthCallbackState(raw: unknown): OAuthCallbackState | null {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     return null;
@@ -175,10 +181,10 @@ export class DriveAuthService {
   ): Promise<DriveOAuthCallbackResult> {
     let payload: { returnUrl: string; userId: string; workspaceId: string };
     try {
-      const raw: unknown = JSON.parse(
+      const parsedStateRaw: unknown = JSON.parse(
         Buffer.from(state, 'base64url').toString(),
       );
-      const parsed = parseOAuthCallbackState(raw);
+      const parsed = parseOAuthCallbackState(parsedStateRaw);
       if (parsed === null) {
         Sentry.captureMessage(
           'Drive OAuth callback: state payload failed validation',
@@ -222,12 +228,13 @@ export class DriveAuthService {
         ? new Date(tokens.expiry_date)
         : new Date(Date.now() + 3600 * 1000);
 
-      const key = this.scopeKey(payload.userId, payload.workspaceId);
-      this.connections.set(key, {
+      const connectionKey = this.scopeKey(payload.userId, payload.workspaceId);
+      this.connections.set(connectionKey, {
         accessToken: tokens.access_token ?? '',
         refreshToken: tokens.refresh_token,
         expiresAt: expiry,
-        selectedFolderIds: this.connections.get(key)?.selectedFolderIds ?? [],
+        selectedFolderIds:
+          this.connections.get(connectionKey)?.selectedFolderIds ?? [],
       });
       return { returnUrl: safeReturnUrl };
     } catch (cause: unknown) {
@@ -241,11 +248,11 @@ export class DriveAuthService {
 
   getConnection(userId: string, workspaceId: string) {
     if (!userId || !workspaceId) return null;
-    const key = this.scopeKey(userId, workspaceId);
-    const conn = this.connections.get(key);
+    const connectionKey = this.scopeKey(userId, workspaceId);
+    const conn = this.connections.get(connectionKey);
     if (!conn) return null;
     return {
-      id: key,
+      id: connectionKey,
       userId,
       workspaceId,
       accessToken: conn.accessToken,
@@ -305,6 +312,20 @@ export class DriveAuthService {
     return driveForWorkspace;
   }
 
+  private persistRefreshCredentialsIfPresent(
+    driveForWorkspace: DriveForWorkspaceResult,
+  ): void {
+    if (!driveForWorkspace.refreshCredentials) return;
+    const existing = this.connections.get(driveForWorkspace.connKey);
+    if (!existing) return;
+    this.connections.set(driveForWorkspace.connKey, {
+      ...existing,
+      accessToken: driveForWorkspace.refreshCredentials.accessToken,
+      refreshToken: driveForWorkspace.refreshCredentials.refreshToken,
+      expiresAt: driveForWorkspace.refreshCredentials.expiresAt,
+    });
+  }
+
   async listFolders(
     userId: string,
     workspaceId: string,
@@ -328,17 +349,7 @@ export class DriveAuthService {
         fields: 'files(id, name)',
         orderBy: 'name',
       });
-      if (driveForWorkspace.refreshCredentials) {
-        const existing = this.connections.get(driveForWorkspace.connKey);
-        if (existing) {
-          this.connections.set(driveForWorkspace.connKey, {
-            ...existing,
-            accessToken: driveForWorkspace.refreshCredentials.accessToken,
-            refreshToken: driveForWorkspace.refreshCredentials.refreshToken,
-            expiresAt: driveForWorkspace.refreshCredentials.expiresAt,
-          });
-        }
-      }
+      this.persistRefreshCredentialsIfPresent(driveForWorkspace);
       const folders = (filesListResponse.data.files ?? []).map((file) => ({
         id: file.id!,
         name: file.name ?? '(Unnamed)',
@@ -346,6 +357,81 @@ export class DriveAuthService {
       return { folders };
     } catch (error: unknown) {
       return { folders: [], error: googleDriveClientErrorMessage(error) };
+    }
+  }
+
+  async listFilesInSelectedFolders(
+    userId: string,
+    workspaceId: string,
+  ): Promise<DriveIndexableFile[]> {
+    const driveForWorkspace = await this.getDriveForWorkspace(
+      userId,
+      workspaceId,
+    );
+    if (!driveForWorkspace) return [];
+    const selectedFolderIds = driveForWorkspace.conn.selectedFolderIds ?? [];
+    if (selectedFolderIds.length === 0) return [];
+
+    const indexedFilesById = new Map<string, DriveIndexableFile>();
+    for (const selectedFolderId of selectedFolderIds) {
+      const filesListResponse = await driveForWorkspace.drive.files.list({
+        q: `'${selectedFolderId}' in parents and trashed = false and mimeType != '${FOLDER_MIME}'`,
+        pageSize: 1000,
+        fields: 'files(id, name, mimeType)',
+      });
+      const filesInFolder = (filesListResponse.data.files ?? []).map(
+        (file) => ({
+          id: file.id ?? '',
+          name: file.name ?? '(Unnamed)',
+          mimeType: file.mimeType ?? 'application/octet-stream',
+        }),
+      );
+      for (const file of filesInFolder) {
+        if (!file.id) continue;
+        indexedFilesById.set(file.id, file);
+      }
+    }
+
+    this.persistRefreshCredentialsIfPresent(driveForWorkspace);
+    return Array.from(indexedFilesById.values());
+  }
+
+  async exportFileAsText(
+    userId: string,
+    workspaceId: string,
+    fileId: string,
+    mimeType: string,
+  ): Promise<string> {
+    const driveForWorkspace = await this.getDriveForWorkspace(
+      userId,
+      workspaceId,
+    );
+    if (!driveForWorkspace) return '';
+
+    const isGoogleNativeFile = mimeType.startsWith(
+      'application/vnd.google-apps.',
+    );
+    const exportMimeType = isGoogleNativeFile ? 'text/plain' : undefined;
+
+    try {
+      const driveFilesResource = driveForWorkspace.drive.files;
+      const response = exportMimeType
+        ? await driveFilesResource.export(
+            { fileId, mimeType: exportMimeType },
+            { responseType: 'text' },
+          )
+        : await driveFilesResource.get(
+            { fileId, alt: 'media' },
+            { responseType: 'text' },
+          );
+      this.persistRefreshCredentialsIfPresent(driveForWorkspace);
+      return typeof response.data === 'string' ? response.data : '';
+    } catch (error: unknown) {
+      Sentry.captureException(error, {
+        tags: { feature: 'drive', operation: 'export_file_as_text' },
+        extra: { fileId, mimeType, workspaceId },
+      });
+      return '';
     }
   }
 
@@ -357,12 +443,15 @@ export class DriveAuthService {
     if (folderIds.length > 3) {
       return { ok: false, error: 'You may select at most 3 folders.' };
     }
-    const conn = this.getConnection(userId, workspaceId);
-    if (!conn) return { ok: false, error: 'Google Drive not connected.' };
-    const key = this.scopeKey(userId, workspaceId);
-    const existing = this.connections.get(key);
+    const connection = this.getConnection(userId, workspaceId);
+    if (!connection) return { ok: false, error: 'Google Drive not connected.' };
+    const connectionKey = this.scopeKey(userId, workspaceId);
+    const existing = this.connections.get(connectionKey);
     if (!existing) return { ok: false, error: 'Google Drive not connected.' };
-    this.connections.set(key, { ...existing, selectedFolderIds: folderIds });
+    this.connections.set(connectionKey, {
+      ...existing,
+      selectedFolderIds: folderIds,
+    });
     return { ok: true };
   }
 }

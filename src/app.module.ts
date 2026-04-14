@@ -7,6 +7,8 @@ import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
 import { DriveModule } from './drive/drive.module';
+import { RagModule } from './rag/rag.module';
+import { QueueModule } from './queue/queue.module';
 
 @Module({
   imports: [
@@ -16,6 +18,8 @@ import { DriveModule } from './drive/drive.module';
     UsersModule,
     WorkspacesModule,
     DriveModule,
+    RagModule,
+    QueueModule,
   ],
   controllers: [AppController],
   providers: [AppService],

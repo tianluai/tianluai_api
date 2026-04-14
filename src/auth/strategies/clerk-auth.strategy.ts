@@ -27,20 +27,20 @@ export class ClerkAuthStrategy implements IAuthStrategy {
         secretKey,
       })) as Record<string, unknown>;
 
-      const sub = typeof result.sub === 'string' ? result.sub : undefined;
-      const sid = typeof result.sid === 'string' ? result.sid : undefined;
+      const subject = typeof result.sub === 'string' ? result.sub : undefined;
+      const sessionId = typeof result.sid === 'string' ? result.sid : undefined;
 
-      if (!sub) {
+      if (!subject) {
         console.error('[ClerkAuthStrategy] No sub in result:', result);
         throw new UnauthorizedException('Invalid or expired token');
       }
 
-      return { sub, sid };
-    } catch (err: unknown) {
-      if (err instanceof UnauthorizedException) throw err;
+      return { sub: subject, sid: sessionId };
+    } catch (error: unknown) {
+      if (error instanceof UnauthorizedException) throw error;
       const message =
-        err instanceof Error ? err.message : 'Invalid or expired token';
-      console.error('[ClerkAuthStrategy] Token verification error:', err);
+        error instanceof Error ? error.message : 'Invalid or expired token';
+      console.error('[ClerkAuthStrategy] Token verification error:', error);
       throw new UnauthorizedException(message);
     }
   }

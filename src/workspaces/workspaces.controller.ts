@@ -33,8 +33,11 @@ export class WorkspacesController {
       clerkId,
       body.name,
     );
-    const dto: WorkspaceDto = { id: created.id, name: created.name };
-    return dto;
+    const workspaceResponse: WorkspaceDto = {
+      id: created.id,
+      name: created.name,
+    };
+    return workspaceResponse;
   }
 
   @Get(':id')
@@ -44,7 +47,10 @@ export class WorkspacesController {
   ): Promise<WorkspaceDto | null> {
     const workspace = await this.workspacesService.getWorkspace(clerkId, id);
     if (!workspace) return null;
-    const dto: WorkspaceDto = { id: workspace.id, name: workspace.name };
-    return dto;
+    const workspaceResponse: WorkspaceDto = {
+      id: workspace.id,
+      name: workspace.name,
+    };
+    return workspaceResponse;
   }
 }
