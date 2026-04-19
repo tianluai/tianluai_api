@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { AuthGuard } from '../auth/auth.guard';
 import { ClerkUserId } from '../auth/clerk-user.decorator';
 import { CreateWorkspaceDto } from './dto/create-workspace.dto';
@@ -52,5 +60,14 @@ export class WorkspacesController {
       name: workspace.name,
     };
     return workspaceResponse;
+  }
+
+  @Delete(':id')
+  async deleteWorkspace(
+    @ClerkUserId() clerkId: string,
+    @Param('id') id: string,
+  ): Promise<{ ok: true }> {
+    await this.workspacesService.deleteWorkspace(clerkId, id);
+    return { ok: true };
   }
 }

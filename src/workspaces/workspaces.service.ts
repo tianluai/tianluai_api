@@ -1,4 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Organization } from './schemas/organization.schema';
@@ -98,5 +102,44 @@ export class WorkspacesService {
       id: organization._id.toString(),
       name: organization.name,
     };
+  }
+
+  async deleteWorkspace(clerkId: string, workspaceId: string): Promise<void> {
+    if (!Types.ObjectId.isValid(workspaceId)) {
+      throw new NotFoundException('Workspace not found.');
+    }
+
+    const user = await this.usersService.findByClerkId(clerkId);
+    if (!user) {
+      throw new NotFoundException('Workspace not found.');
+    }
+
+    const ownerMembership = await this.memberModel
+      .findOne({
+        organizationId: new Types.ObjectId(workspaceId),
+        userId: user._id,
+        status: 'active',
+      })
+      .exec();
+
+    if (!ownerMembership) {
+      throw new NotFoundException('Workspace not found.');
+    }
+    if (ownerMembership.role !== 'owner') {
+      throw new ForbiddenException(
+        'Only workspace owners can delete workspaces.',
+      );
+    }
+
+    const deletedOrganization = await this.orgModel
+      .findByIdAndDelete(workspaceId)
+      .exec();
+    if (!deletedOrganization) {
+      throw new NotFoundException('Workspace not found.');
+    }
+
+    await this.memberModel
+      .deleteMany({ organizationId: deletedOrganization._id })
+      .exec();
   }
 }
