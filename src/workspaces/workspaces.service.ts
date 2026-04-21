@@ -104,6 +104,21 @@ export class WorkspacesService {
     };
   }
 
+  /**
+   * Ensures the user is an active member of the workspace; throws {@link ForbiddenException} otherwise.
+   * Call from controllers (or guards), not from unrelated domain services, to keep queue/drive/rag
+   * modules from depending on each other for authorization.
+   */
+  async assertWorkspaceMembership(
+    clerkId: string,
+    workspaceId: string,
+  ): Promise<void> {
+    const workspace = await this.getWorkspace(clerkId, workspaceId);
+    if (!workspace) {
+      throw new ForbiddenException('You do not have access to this workspace.');
+    }
+  }
+
   async deleteWorkspace(clerkId: string, workspaceId: string): Promise<void> {
     if (!Types.ObjectId.isValid(workspaceId)) {
       throw new NotFoundException('Workspace not found.');

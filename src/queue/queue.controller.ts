@@ -25,25 +25,15 @@ export class QueueController {
     private readonly workspacesService: WorkspacesService,
   ) {}
 
-  private async ensureWorkspaceAccess(
-    clerkId: string,
-    workspaceId: string,
-  ): Promise<void> {
-    const workspace = await this.workspacesService.getWorkspace(
-      clerkId,
-      workspaceId,
-    );
-    if (!workspace) {
-      throw new ForbiddenException('You do not have access to this workspace.');
-    }
-  }
-
   @Post('document-index')
   async enqueueDocumentIndex(
     @ClerkUserId() clerkId: string,
     @Query() query: QueueWorkspaceQueryDto,
   ): Promise<QueueIndexJobResponseDto> {
-    await this.ensureWorkspaceAccess(clerkId, query.workspaceId);
+    await this.workspacesService.assertWorkspaceMembership(
+      clerkId,
+      query.workspaceId,
+    );
     const queuedJob = await this.queueService.enqueueDocumentIndexJob({
       clerkId,
       workspaceId: query.workspaceId,
@@ -56,7 +46,10 @@ export class QueueController {
     @ClerkUserId() clerkId: string,
     @Query() query: QueueJobStatusQueryDto,
   ) {
-    await this.ensureWorkspaceAccess(clerkId, query.workspaceId);
+    await this.workspacesService.assertWorkspaceMembership(
+      clerkId,
+      query.workspaceId,
+    );
     const queuedJob = await this.queueService.getDocumentIndexJob(query.jobId);
     if (!queuedJob) {
       throw new NotFoundException('Index job not found.');

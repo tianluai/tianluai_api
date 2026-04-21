@@ -5,7 +5,7 @@ import { WorkspacesModule } from '../workspaces/workspaces.module';
 import { DriveModule } from '../drive/drive.module';
 import { RagModule } from '../rag/rag.module';
 import { QueueController } from './queue.controller';
-import { IndexProcessor } from './index.processor';
+import { DocumentIndexJobProcessor } from './document-index-job.processor';
 import { QueueService } from './queue.service';
 
 @Module({
@@ -30,7 +30,7 @@ import { QueueService } from './queue.service';
     BullModule.registerQueue({ name: 'document-index' }),
   ],
   controllers: [QueueController],
-  providers: [IndexProcessor, QueueService],
+  providers: [DocumentIndexJobProcessor, QueueService],
   exports: [QueueService],
 })
 export class QueueModule {}

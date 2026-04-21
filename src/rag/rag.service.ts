@@ -1,29 +1,21 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { VECTOR_INDEX_STORE } from '../indexing/indexing.tokens';
+import type { VectorIndexStore } from '../indexing/vector-index-store.port';
 import { OpenAIService } from './openai.service';
-import { PineconeService } from './pinecone.service';
 
-const DEFAULT_SYSTEM_PROMPT = `You are a helpful AI assistant for the company.
-
-You have access to documents from the company's Google Drive. Your job is to answer questions based strictly on the content of those documents.
-
-Rules:
-- Only answer based on information found in the provided documents
-- If the answer is not in the documents, say clearly: "I don't have that information in the available documents."
-- Never make up or assume information that is not explicitly in the documents
-- If a question is partially answered by the documents, share what you found and flag what is missing
-- Keep answers clear, concise, and professional
-- If the user asks something unrelated to the documents, politely redirect them
-
-When answering:
-- Reference which document the information came from when possible
-- Use bullet points for lists and structured information
-- Keep a friendly, professional tone`;
+const DEFAULT_SYSTEM_PROMPT = readFileSync(
+  join(__dirname, 'prompts', 'default-system-prompt.md'),
+  'utf8',
+).trim();
 
 @Injectable()
 export class RagService {
   constructor(
     private readonly openai: OpenAIService,
-    private readonly pinecone: PineconeService,
+    @Inject(VECTOR_INDEX_STORE)
+    private readonly vectorIndex: VectorIndexStore,
   ) {}
 
   async retrieve(
@@ -34,7 +26,11 @@ export class RagService {
     const [embedding] = await this.openai.embed([query]);
     if (!embedding) return [];
 
-    const matches = await this.pinecone.query(workspaceId, embedding, topK);
+    const matches = await this.vectorIndex.querySimilar(
+      workspaceId,
+      embedding,
+      topK,
+    );
     return matches.map((match) => match.text).filter(Boolean);
   }
 
@@ -53,6 +49,7 @@ export class RagService {
     );
   }
 
+  /** Async generator (`async *`) streams answer chunks via `yield` for SSE-style consumption. */
   async *streamChat(
     workspaceId: string,
     userMessage: string,

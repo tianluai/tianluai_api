@@ -1,7 +1,6 @@
 import {
   Body,
   Controller,
-  ForbiddenException,
   Get,
   Post,
   Query,
@@ -27,24 +26,13 @@ export class DriveController {
     private readonly workspaces: WorkspacesService,
   ) {}
 
-  /** Ensures the authenticated user is an active member of the workspace (organization). */
-  private async ensureWorkspaceAccess(
-    clerkId: string,
-    workspaceId: string,
-  ): Promise<void> {
-    const workspace = await this.workspaces.getWorkspace(clerkId, workspaceId);
-    if (!workspace) {
-      throw new ForbiddenException('You do not have access to this workspace.');
-    }
-  }
-
   @Get('status')
   @UseGuards(AuthGuard)
   async status(
     @ClerkUserId() clerkId: string,
     @Query() query: DriveWorkspaceQueryDto,
   ) {
-    await this.ensureWorkspaceAccess(clerkId, query.workspaceId);
+    await this.workspaces.assertWorkspaceMembership(clerkId, query.workspaceId);
     const driveConfigured = this.driveAuth.isConfigured();
     const conn = this.driveAuth.getConnection(clerkId, query.workspaceId);
     return {
@@ -60,7 +48,7 @@ export class DriveController {
     @ClerkUserId() clerkId: string,
     @Query() query: DriveFoldersQueryDto,
   ) {
-    await this.ensureWorkspaceAccess(clerkId, query.workspaceId);
+    await this.workspaces.assertWorkspaceMembership(clerkId, query.workspaceId);
     return this.driveAuth.listFolders(
       clerkId,
       query.workspaceId,
@@ -74,7 +62,7 @@ export class DriveController {
     @ClerkUserId() clerkId: string,
     @Body() body: DriveSaveFoldersBodyDto,
   ) {
-    await this.ensureWorkspaceAccess(clerkId, body.workspaceId);
+    await this.workspaces.assertWorkspaceMembership(clerkId, body.workspaceId);
     return this.driveAuth.saveSelectedFolders(
       clerkId,
       body.workspaceId,
@@ -85,7 +73,7 @@ export class DriveController {
   @Post('auth')
   @UseGuards(AuthGuard)
   async auth(@ClerkUserId() clerkId: string, @Body() body: DriveAuthBodyDto) {
-    await this.ensureWorkspaceAccess(clerkId, body.workspaceId);
+    await this.workspaces.assertWorkspaceMembership(clerkId, body.workspaceId);
     const result = this.driveAuth.getAuthUrl(
       body.returnUrl,
       clerkId,

@@ -1,12 +1,6 @@
-import {
-  Body,
-  Controller,
-  ForbiddenException,
-  Post,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Post, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '../auth/auth.guard';
-import { ClerkUserId } from '../auth/clerk-user.decorator';
+import { AuthUserId } from '../auth/auth-user.decorator';
 import { WorkspacesService } from '../workspaces/workspaces.service';
 import { RagChatRequestDto } from './dto/rag-chat.dto';
 import { RagService } from './rag.service';
@@ -19,22 +13,15 @@ export class RagController {
     private readonly workspacesService: WorkspacesService,
   ) {}
 
-  private async ensureWorkspaceAccess(
-    clerkId: string,
-    workspaceId: string,
-  ): Promise<void> {
-    const workspace = await this.workspacesService.getWorkspace(
-      clerkId,
-      workspaceId,
-    );
-    if (!workspace) {
-      throw new ForbiddenException('You do not have access to this workspace.');
-    }
-  }
-
   @Post('chat')
-  async chat(@ClerkUserId() clerkId: string, @Body() body: RagChatRequestDto) {
-    await this.ensureWorkspaceAccess(clerkId, body.workspaceId);
+  async chat(
+    @AuthUserId() authUserId: string,
+    @Body() body: RagChatRequestDto,
+  ) {
+    await this.workspacesService.assertWorkspaceMembership(
+      authUserId,
+      body.workspaceId,
+    );
 
     const chunks: string[] = [];
     for await (const delta of this.ragService.streamChat(

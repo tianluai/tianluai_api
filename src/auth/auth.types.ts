@@ -1,11 +1,11 @@
 /**
- * Payload attached to request.user after successful auth.
- * Strategy-specific (e.g. Clerk uses sub/sid); keep minimal for guard.
+ * Payload attached to `request.user` after successful auth.
+ * `sub` is the standard JWT subject (stable user id from the identity provider).
  */
 export interface AuthPayload {
   sub: string;
   sid?: string;
 }
 
-/** @deprecated Use AuthPayload. Kept for compatibility with ClerkUserId decorator. */
+/** @deprecated Use AuthPayload. */
 export type ClerkPayload = AuthPayload;

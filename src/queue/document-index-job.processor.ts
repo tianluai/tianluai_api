@@ -1,9 +1,13 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
+import { Inject, Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
-import { DriveAuthService } from '../drive/drive-auth.service';
+import {
+  VECTOR_INDEX_STORE,
+  WORKSPACE_DOCUMENT_SOURCE,
+} from '../indexing/indexing.tokens';
+import type { VectorIndexStore } from '../indexing/vector-index-store.port';
+import type { WorkspaceDocumentSource } from '../indexing/workspace-document-source.port';
 import { OpenAIService } from '../rag/openai.service';
-import { PineconeService } from '../rag/pinecone.service';
 import type { DocumentIndexJobData } from './queue.types';
 
 const CHUNK_SIZE = 800;
@@ -51,19 +55,27 @@ function chunkText(
   return chunks;
 }
 
+/**
+ * BullMQ worker for the `document-index` queue: lists documents from a
+ * {@link WorkspaceDocumentSource}, chunks text, embeds with OpenAI, and upserts
+ * vectors into a {@link VectorIndexStore} for RAG. Source and store are bound via
+ * Nest tokens so implementations can change (e.g. Notion + pgvector).
+ */
 @Processor('document-index', {
   lockDuration: DOCUMENT_INDEX_LOCK_DURATION_MS,
   lockRenewTime: 60_000,
   stalledInterval: 120_000,
   maxStalledCount: 5,
 })
-export class IndexProcessor extends WorkerHost {
-  private readonly logger = new Logger(IndexProcessor.name);
+export class DocumentIndexJobProcessor extends WorkerHost {
+  private readonly logger = new Logger(DocumentIndexJobProcessor.name);
 
   constructor(
-    private readonly driveAuth: DriveAuthService,
+    @Inject(WORKSPACE_DOCUMENT_SOURCE)
+    private readonly documentSource: WorkspaceDocumentSource,
     private readonly openai: OpenAIService,
-    private readonly pinecone: PineconeService,
+    @Inject(VECTOR_INDEX_STORE)
+    private readonly vectorIndex: VectorIndexStore,
   ) {
     super();
   }
@@ -71,12 +83,9 @@ export class IndexProcessor extends WorkerHost {
   async process(job: Job<DocumentIndexJobData>): Promise<unknown> {
     const { clerkId, workspaceId } = job.data;
     this.logger.log(
-      `Index job ${job.id}: clerkId=${clerkId}, workspace=${workspaceId}`,
+      `Document index job ${job.id}: clerkId=${clerkId}, workspace=${workspaceId}, documentSource=${this.documentSource.providerId}, vectorIndex=${this.vectorIndex.providerId}`,
     );
-    const files = await this.driveAuth.listFilesInSelectedFolders(
-      clerkId,
-      workspaceId,
-    );
+    const files = await this.documentSource.listDocuments(clerkId, workspaceId);
     this.logger.log(`Found ${files.length} files to index`);
 
     if (files.length === 0) {
@@ -112,7 +121,7 @@ export class IndexProcessor extends WorkerHost {
         this.logger.log(
           `Processing file: ${file.name} (${file.mimeType})${supported ? '' : ' [unsupported type]'}`,
         );
-        const text = await this.driveAuth.exportFileAsText(
+        const text = await this.documentSource.exportDocumentText(
           clerkId,
           workspaceId,
           file.id,
@@ -151,7 +160,7 @@ export class IndexProcessor extends WorkerHost {
             },
           }));
 
-          await this.pinecone.upsert(workspaceId, vectors);
+          await this.vectorIndex.upsertVectors(workspaceId, vectors);
           totalChunks += vectors.length;
           await job.updateProgress({
             filesTotal: files.length,
@@ -170,7 +179,7 @@ export class IndexProcessor extends WorkerHost {
     }
 
     this.logger.log(
-      `Index job ${job.id} complete: ${totalChunks} chunks indexed across ${files.length} files`,
+      `Document index job ${job.id} complete: ${totalChunks} chunks indexed across ${files.length} files`,
     );
     return { indexed: totalChunks, files: files.length };
   }
