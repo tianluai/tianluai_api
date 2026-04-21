@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import type { JobState, Queue } from 'bullmq';
 import type { DocumentIndexJobData } from './queue.types';
 
+/** BullMQ only — no workspace/drive/rag coupling (avoids import cycles). */
 @Injectable()
 export class QueueService {
   constructor(

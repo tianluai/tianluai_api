@@ -1,9 +1,4 @@
-import { createParamDecorator, ExecutionContext } from '@nestjs/common';
-import type { AuthPayload } from './auth.types';
-
-export const ClerkUserId = createParamDecorator(
-  (_: unknown, ctx: ExecutionContext): string => {
-    const request = ctx.switchToHttp().getRequest<{ user: AuthPayload }>();
-    return request.user.sub;
-  },
-);
+/**
+ * @deprecated Use `AuthUserId` from `./auth-user.decorator` — same behavior (`request.user.sub`).
+ */
+export { AuthUserId, AuthUserId as ClerkUserId } from './auth-user.decorator';
