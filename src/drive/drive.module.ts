@@ -7,5 +7,6 @@ import { DriveController } from './drive.controller';
   imports: [WorkspacesModule],
   controllers: [DriveController],
   providers: [DriveAuthService],
+  exports: [DriveAuthService],
 })
 export class DriveModule {}

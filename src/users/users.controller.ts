@@ -16,12 +16,12 @@ export class UsersController {
   @Get('me')
   async getMe(@ClerkUserId() clerkId: string): Promise<UserDto> {
     const user = await this.usersService.findOrCreateByClerkId(clerkId, {});
-    const dto: UserDto = {
+    const userResponse: UserDto = {
       id: user._id.toString(),
       clerkId: user.clerkId,
       email: user.email,
       name: user.name,
     };
-    return dto;
+    return userResponse;
   }
 }

@@ -1,4 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Organization } from './schemas/organization.schema';
@@ -21,21 +25,21 @@ export class WorkspacesService {
   ): Promise<{ id: string; name: string }> {
     const user = await this.usersService.findOrCreateByClerkId(clerkId, {});
 
-    const org = await this.orgModel.create({
+    const organization = await this.orgModel.create({
       name,
       ownerId: user._id,
     });
 
     await this.memberModel.create({
-      organizationId: org._id,
+      organizationId: organization._id,
       userId: user._id,
       role: 'owner',
       status: 'active',
     });
 
     return {
-      id: org._id.toString(),
-      name: org.name,
+      id: organization._id.toString(),
+      name: organization.name,
     };
   }
 
@@ -56,16 +60,20 @@ export class WorkspacesService {
       .exec();
 
     return memberships
-      .filter((m) => m.organizationId && typeof m.organizationId === 'object')
-      .map((m) => {
-        const org = m.organizationId as unknown as {
+      .filter(
+        (membership) =>
+          membership.organizationId &&
+          typeof membership.organizationId === 'object',
+      )
+      .map((membership) => {
+        const organization = membership.organizationId as unknown as {
           _id: Types.ObjectId;
           name: string;
         };
         return {
-          id: org._id.toString(),
-          name: org.name,
-          role: m.role,
+          id: organization._id.toString(),
+          name: organization.name,
+          role: membership.role,
         };
       });
   }
@@ -87,12 +95,51 @@ export class WorkspacesService {
 
     if (!member) return null;
 
-    const org = await this.orgModel.findById(workspaceId).exec();
-    if (!org) return null;
+    const organization = await this.orgModel.findById(workspaceId).exec();
+    if (!organization) return null;
 
     return {
-      id: org._id.toString(),
-      name: org.name,
+      id: organization._id.toString(),
+      name: organization.name,
     };
+  }
+
+  async deleteWorkspace(clerkId: string, workspaceId: string): Promise<void> {
+    if (!Types.ObjectId.isValid(workspaceId)) {
+      throw new NotFoundException('Workspace not found.');
+    }
+
+    const user = await this.usersService.findByClerkId(clerkId);
+    if (!user) {
+      throw new NotFoundException('Workspace not found.');
+    }
+
+    const ownerMembership = await this.memberModel
+      .findOne({
+        organizationId: new Types.ObjectId(workspaceId),
+        userId: user._id,
+        status: 'active',
+      })
+      .exec();
+
+    if (!ownerMembership) {
+      throw new NotFoundException('Workspace not found.');
+    }
+    if (ownerMembership.role !== 'owner') {
+      throw new ForbiddenException(
+        'Only workspace owners can delete workspaces.',
+      );
+    }
+
+    const deletedOrganization = await this.orgModel
+      .findByIdAndDelete(workspaceId)
+      .exec();
+    if (!deletedOrganization) {
+      throw new NotFoundException('Workspace not found.');
+    }
+
+    await this.memberModel
+      .deleteMany({ organizationId: deletedOrganization._id })
+      .exec();
   }
 }
