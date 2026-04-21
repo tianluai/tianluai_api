@@ -1,14 +1,34 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { VECTOR_INDEX_STORE } from '../indexing/indexing.tokens';
 import type { VectorIndexStore } from '../indexing/vector-index-store.port';
 import { OpenAIService } from './openai.service';
 
-const DEFAULT_SYSTEM_PROMPT = readFileSync(
-  join(__dirname, 'prompts', 'default-system-prompt.md'),
-  'utf8',
-).trim();
+/**
+ * Nest copies `src/rag/prompts/*.md` to `dist/rag/prompts/`, while compiled JS lives under
+ * `dist/src/rag/`. Try `./prompts` first (source / co-located build), then `dist/rag/prompts`.
+ */
+function loadDefaultSystemPrompt(): string {
+  const nextToModule = join(__dirname, 'prompts', 'default-system-prompt.md');
+  const nestCliAssetPath = join(
+    __dirname,
+    '..',
+    '..',
+    'rag',
+    'prompts',
+    'default-system-prompt.md',
+  );
+  const path = existsSync(nextToModule) ? nextToModule : nestCliAssetPath;
+  if (!existsSync(path)) {
+    throw new Error(
+      `RAG default system prompt not found. Tried:\n- ${nextToModule}\n- ${nestCliAssetPath}`,
+    );
+  }
+  return readFileSync(path, 'utf8').trim();
+}
+
+const DEFAULT_SYSTEM_PROMPT = loadDefaultSystemPrompt();
 
 @Injectable()
 export class RagService {
