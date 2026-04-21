@@ -8,7 +8,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '../auth/auth.guard';
-import { ClerkUserId } from '../auth/clerk-user.decorator';
+import { AuthUserId } from '../auth/auth-user.decorator';
 import { WorkspacesService } from '../workspaces/workspaces.service';
 import {
   QueueIndexJobResponseDto,
@@ -27,15 +27,15 @@ export class QueueController {
 
   @Post('document-index')
   async enqueueDocumentIndex(
-    @ClerkUserId() clerkId: string,
+    @AuthUserId() authUserId: string,
     @Query() query: QueueWorkspaceQueryDto,
   ): Promise<QueueIndexJobResponseDto> {
     await this.workspacesService.assertWorkspaceMembership(
-      clerkId,
+      authUserId,
       query.workspaceId,
     );
     const queuedJob = await this.queueService.enqueueDocumentIndexJob({
-      clerkId,
+      clerkId: authUserId,
       workspaceId: query.workspaceId,
     });
     return { jobId: String(queuedJob.id) };
@@ -43,11 +43,11 @@ export class QueueController {
 
   @Get('document-index')
   async getDocumentIndexStatus(
-    @ClerkUserId() clerkId: string,
+    @AuthUserId() authUserId: string,
     @Query() query: QueueJobStatusQueryDto,
   ) {
     await this.workspacesService.assertWorkspaceMembership(
-      clerkId,
+      authUserId,
       query.workspaceId,
     );
     const queuedJob = await this.queueService.getDocumentIndexJob(query.jobId);
@@ -56,7 +56,7 @@ export class QueueController {
     }
     if (
       queuedJob.data.workspaceId !== query.workspaceId ||
-      queuedJob.data.clerkId !== clerkId
+      queuedJob.data.clerkId !== authUserId
     ) {
       throw new ForbiddenException('You do not have access to this index job.');
     }
