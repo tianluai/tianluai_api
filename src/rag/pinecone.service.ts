@@ -74,4 +74,21 @@ export class PineconeService implements OnModuleInit {
       .namespace(this.toNamespace(workspaceId));
     await workspaceNamespace.upsert({ records: vectors });
   }
+
+  /**
+   * Number of vector records in the workspace namespace (RAG index). Returns null if
+   * Pinecone is not configured or the call fails.
+   */
+  async getNamespaceRecordCount(workspaceId: string): Promise<number | null> {
+    if (!this.client) return null;
+    try {
+      const stats = await this.client
+        .index(this.indexName)
+        .describeIndexStats();
+      const summary = stats.namespaces?.[this.toNamespace(workspaceId)];
+      return summary?.recordCount ?? 0;
+    } catch {
+      return null;
+    }
+  }
 }

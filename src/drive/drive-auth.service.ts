@@ -1,10 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectModel } from '@nestjs/mongoose';
 import * as Sentry from '@sentry/node';
 import { google } from 'googleapis';
 import type { drive_v3 } from 'googleapis';
+import { Model, Types } from 'mongoose';
 
+import {
+  extractTextFromBinaryDocument,
+  isBinaryDocumentMimeType,
+} from './extract-uploaded-file-text';
 import { googleDriveClientErrorMessage } from './google-drive-client-error';
+import { WorkspaceDriveConnection } from './schemas/workspace-drive-connection.schema';
 
 const DRIVE_SCOPES = [
   'https://www.googleapis.com/auth/drive.readonly',
@@ -106,7 +113,11 @@ export class DriveAuthService {
     }
   >();
 
-  constructor(config: ConfigService) {
+  constructor(
+    config: ConfigService,
+    @InjectModel(WorkspaceDriveConnection.name)
+    private readonly driveConnectionModel: Model<WorkspaceDriveConnection>,
+  ) {
     this.googleRedirectUri = config.get<string>('GOOGLE_REDIRECT_URI');
     this.apiPublicUrl = config.get<string>('API_PUBLIC_URL');
     this.port = Number(config.get('PORT', 4000));
@@ -229,13 +240,26 @@ export class DriveAuthService {
         : new Date(Date.now() + 3600 * 1000);
 
       const connectionKey = this.scopeKey(payload.userId, payload.workspaceId);
+      const existingFromDb = Types.ObjectId.isValid(payload.workspaceId)
+        ? await this.driveConnectionModel
+            .findOne({
+              clerkUserId: payload.userId,
+              workspaceId: new Types.ObjectId(payload.workspaceId),
+            })
+            .lean()
+            .exec()
+        : null;
+      const selectedFolderIds =
+        this.connections.get(connectionKey)?.selectedFolderIds ??
+        existingFromDb?.selectedFolderIds ??
+        [];
       this.connections.set(connectionKey, {
         accessToken: tokens.access_token ?? '',
         refreshToken: tokens.refresh_token,
         expiresAt: expiry,
-        selectedFolderIds:
-          this.connections.get(connectionKey)?.selectedFolderIds ?? [],
+        selectedFolderIds,
       });
+      await this.persistConnectionToDb(payload.userId, payload.workspaceId);
       return { returnUrl: safeReturnUrl };
     } catch (cause: unknown) {
       Sentry.captureException(cause, {
@@ -262,6 +286,64 @@ export class DriveAuthService {
     };
   }
 
+  private async persistConnectionToDb(
+    userId: string,
+    workspaceId: string,
+  ): Promise<void> {
+    if (!Types.ObjectId.isValid(workspaceId)) return;
+    const key = this.scopeKey(userId, workspaceId);
+    const conn = this.connections.get(key);
+    if (!conn) return;
+    try {
+      await this.driveConnectionModel.findOneAndUpdate(
+        { clerkUserId: userId, workspaceId: new Types.ObjectId(workspaceId) },
+        {
+          $set: {
+            clerkUserId: userId,
+            workspaceId: new Types.ObjectId(workspaceId),
+            refreshToken: conn.refreshToken,
+            accessToken: conn.accessToken,
+            expiresAt: conn.expiresAt,
+            selectedFolderIds: conn.selectedFolderIds ?? [],
+          },
+        },
+        { upsert: true, new: true },
+      );
+    } catch (cause: unknown) {
+      Sentry.captureException(cause, {
+        tags: { feature: 'drive', operation: 'persist_connection' },
+        extra: { workspaceId },
+      });
+    }
+  }
+
+  /**
+   * Loads OAuth tokens from MongoDB into memory after API restart.
+   */
+  async hydrateConnectionFromDatabase(
+    userId: string,
+    workspaceId: string,
+  ): Promise<void> {
+    if (!userId || !workspaceId) return;
+    const key = this.scopeKey(userId, workspaceId);
+    if (this.connections.has(key)) return;
+    if (!Types.ObjectId.isValid(workspaceId)) return;
+    const doc = await this.driveConnectionModel
+      .findOne({
+        clerkUserId: userId,
+        workspaceId: new Types.ObjectId(workspaceId),
+      })
+      .lean()
+      .exec();
+    if (!doc) return;
+    this.connections.set(key, {
+      accessToken: doc.accessToken,
+      refreshToken: doc.refreshToken,
+      expiresAt: doc.expiresAt,
+      selectedFolderIds: doc.selectedFolderIds ?? [],
+    });
+  }
+
   private async getOAuth2ClientForConnection(conn: {
     accessToken: string;
     refreshToken: string;
@@ -275,16 +357,116 @@ export class DriveAuthService {
       expiry_date: conn.expiresAt.getTime(),
     });
     if (conn.expiresAt.getTime() <= Date.now() + 5 * 60 * 1000) {
-      const { credentials } = await client.refreshAccessToken();
-      return { client, credentials };
+      try {
+        const { credentials } = await client.refreshAccessToken();
+        return { client, credentials };
+      } catch (cause: unknown) {
+        Sentry.captureException(cause, {
+          tags: { feature: 'drive', operation: 'refresh_access_token' },
+        });
+        return null;
+      }
     }
     return { client, credentials: null };
+  }
+
+  /**
+   * Returns true when tokens load and Google Drive API can be used (refresh succeeded if needed).
+   */
+  async isDriveSessionValid(
+    userId: string,
+    workspaceId: string,
+  ): Promise<boolean> {
+    return (await this.getDriveForWorkspace(userId, workspaceId)) !== null;
+  }
+
+  async getCachedUiSnapshotFromDatabase(
+    clerkUserId: string,
+    workspaceId: string,
+  ): Promise<{
+    cachedFolderSummaries: { id: string; name: string }[];
+    cachedIndexedFileNames: string[];
+    cachedTotalIndexedFiles: number;
+  } | null> {
+    if (!Types.ObjectId.isValid(workspaceId)) return null;
+    const doc = (await this.driveConnectionModel
+      .findOne({
+        clerkUserId,
+        workspaceId: new Types.ObjectId(workspaceId),
+      })
+      .select(
+        'cachedFolderSummaries cachedIndexedFileNames cachedTotalIndexedFiles',
+      )
+      .lean()
+      .exec()) as {
+      cachedFolderSummaries?: { id: string; name: string }[];
+      cachedIndexedFileNames?: string[];
+      cachedTotalIndexedFiles?: number;
+    } | null;
+    if (!doc) return null;
+    return {
+      cachedFolderSummaries: Array.isArray(doc.cachedFolderSummaries)
+        ? doc.cachedFolderSummaries
+        : [],
+      cachedIndexedFileNames: Array.isArray(doc.cachedIndexedFileNames)
+        ? doc.cachedIndexedFileNames
+        : [],
+      cachedTotalIndexedFiles:
+        typeof doc.cachedTotalIndexedFiles === 'number'
+          ? doc.cachedTotalIndexedFiles
+          : 0,
+    };
+  }
+
+  async persistUiSnapshot(
+    clerkUserId: string,
+    workspaceId: string,
+    payload: {
+      cachedFolderSummaries: { id: string; name: string }[];
+      cachedIndexedFileNames: string[];
+      cachedTotalIndexedFiles: number;
+    },
+  ): Promise<void> {
+    if (!Types.ObjectId.isValid(workspaceId)) return;
+    try {
+      await this.driveConnectionModel.updateOne(
+        { clerkUserId, workspaceId: new Types.ObjectId(workspaceId) },
+        { $set: payload },
+      );
+    } catch (cause: unknown) {
+      Sentry.captureException(cause, {
+        tags: { feature: 'drive', operation: 'persist_ui_snapshot' },
+        extra: { workspaceId },
+      });
+    }
+  }
+
+  /**
+   * Called after an index job so the documents UI can show folder/file names even when
+   * the Google session later expires.
+   */
+  async persistSnapshotAfterIndexJob(
+    clerkId: string,
+    workspaceId: string,
+    indexedFiles: { name: string }[],
+  ): Promise<void> {
+    if (!(await this.isDriveSessionValid(clerkId, workspaceId))) return;
+    const folderSummaries = await this.getSelectedFolderSummaries(
+      clerkId,
+      workspaceId,
+    );
+    await this.persistUiSnapshot(clerkId, workspaceId, {
+      cachedFolderSummaries: folderSummaries,
+      cachedIndexedFileNames: indexedFiles.map((f) => f.name).slice(0, 50),
+      cachedTotalIndexedFiles: indexedFiles.length,
+    });
   }
 
   async getDriveForWorkspace(
     userId: string,
     workspaceId: string,
   ): Promise<DriveForWorkspaceResult | null> {
+    await this.hydrateConnectionFromDatabase(userId, workspaceId);
     const conn = this.getConnection(userId, workspaceId);
     if (!conn) return null;
     const authClientResult = await this.getOAuth2ClientForConnection(conn);
@@ -312,9 +494,9 @@ export class DriveAuthService {
     return driveForWorkspace;
   }
 
-  private persistRefreshCredentialsIfPresent(
+  private async persistRefreshCredentialsIfPresent(
     driveForWorkspace: DriveForWorkspaceResult,
-  ): void {
+  ): Promise<void> {
     if (!driveForWorkspace.refreshCredentials) return;
     const existing = this.connections.get(driveForWorkspace.connKey);
     if (!existing) return;
@@ -324,6 +506,13 @@ export class DriveAuthService {
       refreshToken: driveForWorkspace.refreshCredentials.refreshToken,
       expiresAt: driveForWorkspace.refreshCredentials.expiresAt,
     });
+    const sep = driveForWorkspace.connKey.lastIndexOf('::');
+    if (sep <= 0) return;
+    const userId = driveForWorkspace.connKey.slice(0, sep);
+    const workspaceId = driveForWorkspace.connKey.slice(sep + 2);
+    if (userId && workspaceId) {
+      await this.persistConnectionToDb(userId, workspaceId);
+    }
   }
 
   async listFolders(
@@ -349,7 +538,7 @@ export class DriveAuthService {
         fields: 'files(id, name)',
         orderBy: 'name',
       });
-      this.persistRefreshCredentialsIfPresent(driveForWorkspace);
+      await this.persistRefreshCredentialsIfPresent(driveForWorkspace);
       const folders = (filesListResponse.data.files ?? []).map((file) => ({
         id: file.id!,
         name: file.name ?? '(Unnamed)',
@@ -392,7 +581,7 @@ export class DriveAuthService {
       }
     }
 
-    this.persistRefreshCredentialsIfPresent(driveForWorkspace);
+    await this.persistRefreshCredentialsIfPresent(driveForWorkspace);
     return Array.from(indexedFilesById.values());
   }
 
@@ -411,20 +600,40 @@ export class DriveAuthService {
     const isGoogleNativeFile = mimeType.startsWith(
       'application/vnd.google-apps.',
     );
-    const exportMimeType = isGoogleNativeFile ? 'text/plain' : undefined;
 
     try {
       const driveFilesResource = driveForWorkspace.drive.files;
-      const response = exportMimeType
-        ? await driveFilesResource.export(
-            { fileId, mimeType: exportMimeType },
-            { responseType: 'text' },
-          )
-        : await driveFilesResource.get(
-            { fileId, alt: 'media' },
-            { responseType: 'text' },
-          );
-      this.persistRefreshCredentialsIfPresent(driveForWorkspace);
+
+      if (isGoogleNativeFile) {
+        const response = await driveFilesResource.export(
+          { fileId, mimeType: 'text/plain' },
+          { responseType: 'text' },
+        );
+        await this.persistRefreshCredentialsIfPresent(driveForWorkspace);
+        return typeof response.data === 'string' ? response.data : '';
+      }
+
+      if (isBinaryDocumentMimeType(mimeType)) {
+        const response = await driveFilesResource.get(
+          { fileId, alt: 'media' },
+          { responseType: 'arraybuffer' },
+        );
+        await this.persistRefreshCredentialsIfPresent(driveForWorkspace);
+        const raw = response.data as ArrayBuffer | Buffer | Uint8Array | null;
+        if (raw == null) return '';
+        const buffer = Buffer.isBuffer(raw)
+          ? raw
+          : raw instanceof ArrayBuffer
+            ? Buffer.from(raw)
+            : Buffer.from(raw);
+        return await extractTextFromBinaryDocument(buffer, mimeType);
+      }
+
+      const response = await driveFilesResource.get(
+        { fileId, alt: 'media' },
+        { responseType: 'text' },
+      );
+      await this.persistRefreshCredentialsIfPresent(driveForWorkspace);
       return typeof response.data === 'string' ? response.data : '';
     } catch (error: unknown) {
       Sentry.captureException(error, {
@@ -435,14 +644,64 @@ export class DriveAuthService {
     }
   }
 
-  saveSelectedFolders(
+  /**
+   * Resolves display names for the user’s selected folder ids (for status / UI).
+   */
+  async getSelectedFolderSummaries(
+    userId: string,
+    workspaceId: string,
+  ): Promise<{ id: string; name: string }[]> {
+    const driveForWorkspace = await this.getDriveForWorkspace(
+      userId,
+      workspaceId,
+    );
+    if (!driveForWorkspace) return [];
+    const ids = driveForWorkspace.conn.selectedFolderIds ?? [];
+    if (ids.length === 0) return [];
+
+    const summaries = await Promise.all(
+      ids.map(async (folderId) => {
+        try {
+          const fileResponse = await driveForWorkspace.drive.files.get({
+            fileId: folderId,
+            fields: 'id, name',
+          });
+          return {
+            id: fileResponse.data.id ?? folderId,
+            name: fileResponse.data.name ?? '(Folder)',
+          };
+        } catch {
+          return { id: folderId, name: '(Unavailable)' };
+        }
+      }),
+    );
+    await this.persistRefreshCredentialsIfPresent(driveForWorkspace);
+    return summaries;
+  }
+
+  /**
+   * Sample of indexable file names under selected folders (for UX; capped).
+   */
+  async getIndexedSourcesPreview(
+    userId: string,
+    workspaceId: string,
+    maxNames: number,
+  ): Promise<{ fileNames: string[]; totalFiles: number }> {
+    const files = await this.listFilesInSelectedFolders(userId, workspaceId);
+    const totalFiles = files.length;
+    const fileNames = files.slice(0, maxNames).map((file) => file.name);
+    return { fileNames, totalFiles };
+  }
+
+  async saveSelectedFolders(
     userId: string,
     workspaceId: string,
     folderIds: string[],
-  ): { ok: boolean; error?: string } {
+  ): Promise<{ ok: boolean; error?: string }> {
     if (folderIds.length > 3) {
       return { ok: false, error: 'You may select at most 3 folders.' };
     }
+    await this.hydrateConnectionFromDatabase(userId, workspaceId);
     const connection = this.getConnection(userId, workspaceId);
     if (!connection) return { ok: false, error: 'Google Drive not connected.' };
     const connectionKey = this.scopeKey(userId, workspaceId);
@@ -452,6 +711,23 @@ export class DriveAuthService {
       ...existing,
       selectedFolderIds: folderIds,
     });
+    await this.persistConnectionToDb(userId, workspaceId);
+    if (await this.isDriveSessionValid(userId, workspaceId)) {
+      const folders = await this.getSelectedFolderSummaries(
+        userId,
+        workspaceId,
+      );
+      const preview = await this.getIndexedSourcesPreview(
+        userId,
+        workspaceId,
+        50,
+      );
+      await this.persistUiSnapshot(userId, workspaceId, {
+        cachedFolderSummaries: folders,
+        cachedIndexedFileNames: preview.fileNames,
+        cachedTotalIndexedFiles: preview.totalFiles,
+      });
+    }
     return { ok: true };
   }
 }

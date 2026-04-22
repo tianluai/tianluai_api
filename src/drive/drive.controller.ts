@@ -10,7 +10,9 @@ import {
 import type { Response } from 'express';
 import { AuthGuard } from '../auth/auth.guard';
 import { ClerkUserId } from '../auth/clerk-user.decorator';
+import { PineconeService } from '../rag/pinecone.service';
 import { WorkspacesService } from '../workspaces/workspaces.service';
+import { WorkspaceSyncStateService } from '../workspaces/workspace-sync-state.service';
 import { DriveAuthService } from './drive-auth.service';
 import { DriveAuthBodyDto } from './dto/drive-auth-body.dto';
 import { DriveSaveFoldersBodyDto } from './dto/drive-save-folders-body.dto';
@@ -24,6 +26,8 @@ export class DriveController {
   constructor(
     private readonly driveAuth: DriveAuthService,
     private readonly workspaces: WorkspacesService,
+    private readonly workspaceSyncState: WorkspaceSyncStateService,
+    private readonly pinecone: PineconeService,
   ) {}
 
   @Get('status')
@@ -33,12 +37,83 @@ export class DriveController {
     @Query() query: DriveWorkspaceQueryDto,
   ) {
     await this.workspaces.assertWorkspaceMembership(clerkId, query.workspaceId);
+    await this.driveAuth.hydrateConnectionFromDatabase(
+      clerkId,
+      query.workspaceId,
+    );
     const driveConfigured = this.driveAuth.isConfigured();
     const conn = this.driveAuth.getConnection(clerkId, query.workspaceId);
+    const cached = await this.driveAuth.getCachedUiSnapshotFromDatabase(
+      clerkId,
+      query.workspaceId,
+    );
+    const driveLive =
+      conn != null &&
+      (await this.driveAuth.isDriveSessionValid(clerkId, query.workspaceId));
+
+    const lastGoogleDriveSyncAt = await this.workspaceSyncState.getLastSyncedAt(
+      query.workspaceId,
+      'google_drive',
+    );
+    const indexedVectorCount = await this.pinecone.getNamespaceRecordCount(
+      query.workspaceId,
+    );
+
+    const selectedFolderIds = conn?.selectedFolderIds ?? [];
+    const lastSyncedIso = lastGoogleDriveSyncAt?.toISOString() ?? null;
+
+    if (driveLive) {
+      const selectedFolders = await this.driveAuth.getSelectedFolderSummaries(
+        clerkId,
+        query.workspaceId,
+      );
+      const indexedSources =
+        selectedFolders.length > 0
+          ? await this.driveAuth.getIndexedSourcesPreview(
+              clerkId,
+              query.workspaceId,
+              50,
+            )
+          : { fileNames: [] as string[], totalFiles: 0 };
+
+      return {
+        connected: true,
+        driveSessionExpired: false,
+        driveConfigured,
+        selectedFolderIds,
+        selectedFolders,
+        indexedSources,
+        lastGoogleDriveSyncAt: lastSyncedIso,
+        indexedVectorCount,
+      };
+    }
+
+    const selectedFoldersFallback =
+      cached != null && cached.cachedFolderSummaries.length > 0
+        ? cached.cachedFolderSummaries
+        : selectedFolderIds.map((id) => ({ id, name: '(Folder)' }));
+
+    const indexedSourcesFallback =
+      cached != null &&
+      (cached.cachedTotalIndexedFiles > 0 ||
+        cached.cachedIndexedFileNames.length > 0)
+        ? {
+            fileNames: cached.cachedIndexedFileNames,
+            totalFiles: cached.cachedTotalIndexedFiles,
+          }
+        : null;
+
+    const driveSessionExpired = conn != null && !driveLive;
+
     return {
-      connected: !!conn,
+      connected: false,
+      driveSessionExpired,
       driveConfigured,
-      selectedFolderIds: conn?.selectedFolderIds ?? [],
+      selectedFolderIds,
+      selectedFolders: selectedFoldersFallback,
+      indexedSources: indexedSourcesFallback,
+      lastGoogleDriveSyncAt: lastSyncedIso,
+      indexedVectorCount,
     };
   }
 
@@ -63,7 +138,7 @@ export class DriveController {
     @Body() body: DriveSaveFoldersBodyDto,
   ) {
     await this.workspaces.assertWorkspaceMembership(clerkId, body.workspaceId);
-    return this.driveAuth.saveSelectedFolders(
+    return await this.driveAuth.saveSelectedFolders(
       clerkId,
       body.workspaceId,
       body.folderIds,
