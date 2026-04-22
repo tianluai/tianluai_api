@@ -1,3 +1,7 @@
+/**
+ * Clerk bearer verification (paused). Re-register `ClerkAuthStrategy` as `AUTH_STRATEGY`
+ * in `auth.module.ts` and point the web app at Clerk again to re-enable.
+ */
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { verifyToken } from '@clerk/backend';
 import { Request } from 'express';
