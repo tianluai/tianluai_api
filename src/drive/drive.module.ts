@@ -1,12 +1,27 @@
 import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { RagModule } from '../rag/rag.module';
 import { WorkspacesModule } from '../workspaces/workspaces.module';
 import { WORKSPACE_DOCUMENT_SOURCE } from '../indexing/indexing.tokens';
 import { DriveAuthService } from './drive-auth.service';
 import { DriveController } from './drive.controller';
 import { GoogleDriveWorkspaceDocumentSource } from './google-drive-workspace-document-source.service';
+import {
+  WorkspaceDriveConnection,
+  WorkspaceDriveConnectionSchema,
+} from './schemas/workspace-drive-connection.schema';
 
 @Module({
-  imports: [WorkspacesModule],
+  imports: [
+    WorkspacesModule,
+    RagModule,
+    MongooseModule.forFeature([
+      {
+        name: WorkspaceDriveConnection.name,
+        schema: WorkspaceDriveConnectionSchema,
+      },
+    ]),
+  ],
   controllers: [DriveController],
   providers: [
     DriveAuthService,

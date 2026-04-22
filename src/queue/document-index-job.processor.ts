@@ -7,7 +7,9 @@ import {
 } from '../indexing/indexing.tokens';
 import type { VectorIndexStore } from '../indexing/vector-index-store.port';
 import type { WorkspaceDocumentSource } from '../indexing/workspace-document-source.port';
+import { DriveAuthService } from '../drive/drive-auth.service';
 import { OpenAIService } from '../rag/openai.service';
+import { WorkspaceSyncStateService } from '../workspaces/workspace-sync-state.service';
 import type { DocumentIndexJobData } from './queue.types';
 
 const CHUNK_SIZE = 800;
@@ -76,6 +78,8 @@ export class DocumentIndexJobProcessor extends WorkerHost {
     private readonly openai: OpenAIService,
     @Inject(VECTOR_INDEX_STORE)
     private readonly vectorIndex: VectorIndexStore,
+    private readonly workspaceSyncState: WorkspaceSyncStateService,
+    private readonly driveAuth: DriveAuthService,
   ) {
     super();
   }
@@ -92,6 +96,12 @@ export class DocumentIndexJobProcessor extends WorkerHost {
       this.logger.warn(
         'No files found in selected folders. User may not have selected folders or folders are empty.',
       );
+      await this.recordGoogleDriveSync(workspaceId);
+      await this.driveAuth.persistSnapshotAfterIndexJob(
+        clerkId,
+        workspaceId,
+        [],
+      );
       return { indexed: 0, files: 0 };
     }
 
@@ -102,6 +112,7 @@ export class DocumentIndexJobProcessor extends WorkerHost {
       'application/vnd.google-apps.spreadsheet',
       'application/vnd.google-apps.presentation',
       'application/pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       'text/plain',
       'text/csv',
       'text/markdown',
@@ -181,6 +192,25 @@ export class DocumentIndexJobProcessor extends WorkerHost {
     this.logger.log(
       `Document index job ${job.id} complete: ${totalChunks} chunks indexed across ${files.length} files`,
     );
+    await this.recordGoogleDriveSync(workspaceId);
+    await this.driveAuth.persistSnapshotAfterIndexJob(
+      clerkId,
+      workspaceId,
+      files,
+    );
     return { indexed: totalChunks, files: files.length };
+  }
+
+  private async recordGoogleDriveSync(workspaceId: string): Promise<void> {
+    try {
+      await this.workspaceSyncState.recordSuccessfulSync(
+        workspaceId,
+        'google_drive',
+      );
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Failed to persist last sync time: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 }
