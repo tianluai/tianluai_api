@@ -45,7 +45,7 @@ jobs:
     env:
       MONGODB_URI: mongodb://127.0.0.1:27017/tianluai_ci_test
       CORS_ORIGIN: http://localhost:3000
-      CLERK_SECRET_KEY: sk_test_ci_placeholder
+      AUTH_JWT_SECRET: auth_jwt_secret_ci_placeholder
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -85,6 +85,21 @@ jobs:
     environment: staging
     env:
       DOCR_REGISTRY: ${{ secrets.DOCR_REGISTRY }}
+      PORT: ${{ secrets.PORT }}
+      MONGODB_URI: ${{ secrets.MONGODB_URI }}
+      AUTH_JWT_SECRET: ${{ secrets.AUTH_JWT_SECRET }}
+      CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
+      API_PUBLIC_URL: ${{ secrets.API_PUBLIC_URL }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+      PINECONE_INDEX: ${{ secrets.PINECONE_INDEX }}
+      REDIS_URL: ${{ secrets.REDIS_URL }}
+      REDIS_HOST: ${{ secrets.REDIS_HOST }}
+      REDIS_PORT: ${{ secrets.REDIS_PORT }}
     outputs:
       image-tag: ${{ steps.staging-tag.outputs.tag }}
     steps:
@@ -117,6 +132,22 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PORT=${{ env.PORT }}
+            MONGODB_URI=${{ env.MONGODB_URI }}
+            AUTH_JWT_SECRET=${{ env.AUTH_JWT_SECRET }}
+            CORS_ORIGIN=${{ env.CORS_ORIGIN }}
+            SENTRY_DSN=${{ env.SENTRY_DSN }}
+            GOOGLE_CLIENT_ID=${{ env.GOOGLE_CLIENT_ID }}
+            GOOGLE_CLIENT_SECRET=${{ env.GOOGLE_CLIENT_SECRET }}
+            FRONTEND_URL=${{ env.FRONTEND_URL }}
+            API_PUBLIC_URL=${{ env.API_PUBLIC_URL }}
+            OPENAI_API_KEY=${{ env.OPENAI_API_KEY }}
+            PINECONE_API_KEY=${{ env.PINECONE_API_KEY }}
+            PINECONE_INDEX=${{ env.PINECONE_INDEX }}
+            REDIS_URL=${{ env.REDIS_URL }}
+            REDIS_HOST=${{ env.REDIS_HOST }}
+            REDIS_PORT=${{ env.REDIS_PORT }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
