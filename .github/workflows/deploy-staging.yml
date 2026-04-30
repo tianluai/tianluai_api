@@ -46,6 +46,8 @@ jobs:
       MONGODB_URI: mongodb://127.0.0.1:27017/tianluai_ci_test
       CORS_ORIGIN: http://localhost:3000
       AUTH_JWT_SECRET: auth_jwt_secret_ci_placeholder
+      FRONTEND_URL: http://localhost:3000
+      API_PUBLIC_URL: http://localhost:3001
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

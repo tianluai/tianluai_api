@@ -102,11 +102,15 @@ function normalizeBaseUrl(raw: string | undefined): string | undefined {
   return trimmed.replace(/\/+$/, '');
 }
 
+function missingPublicUrlVarsMessage(details: string): string {
+  return `${details} Configure FRONTEND_URL, and either GOOGLE_REDIRECT_URI or API_PUBLIC_URL (no defaults).`;
+}
+
 @Injectable()
 export class DriveAuthService {
   private readonly googleRedirectUri: string | undefined;
   private readonly apiPublicUrl: string | undefined;
-  private readonly port: number;
+  private readonly driveOAuthRedirectUri: string;
   private readonly googleClientId: string | undefined;
   private readonly googleClientSecret: string | undefined;
   private readonly frontendUrl: string;
@@ -130,12 +134,26 @@ export class DriveAuthService {
       config.get<string>('GOOGLE_REDIRECT_URI'),
     );
     this.apiPublicUrl = normalizeBaseUrl(config.get<string>('API_PUBLIC_URL'));
-    this.port = Number(config.get('PORT', 4000));
     this.googleClientId = config.get<string>('GOOGLE_CLIENT_ID');
     this.googleClientSecret = config.get<string>('GOOGLE_CLIENT_SECRET');
-    this.frontendUrl =
-      normalizeBaseUrl(config.get<string>('FRONTEND_URL')) ??
-      'http://localhost:3000';
+
+    const frontendBase = normalizeBaseUrl(config.get<string>('FRONTEND_URL'));
+    if (!frontendBase) {
+      throw new Error(
+        missingPublicUrlVarsMessage('FRONTEND_URL is missing or empty.'),
+      );
+    }
+    this.frontendUrl = frontendBase;
+
+    if (this.googleRedirectUri) {
+      this.driveOAuthRedirectUri = this.googleRedirectUri;
+    } else if (this.apiPublicUrl) {
+      this.driveOAuthRedirectUri = `${this.apiPublicUrl}/drive/callback`;
+    } else {
+      throw new Error(
+        'Drive OAuth redirect is not configured: GOOGLE_REDIRECT_URI and API_PUBLIC_URL are both missing or empty. Set GOOGLE_REDIRECT_URI (exact callback URL) or API_PUBLIC_URL (base URL for /drive/callback).',
+      );
+    }
   }
 
   private scopeKey(userId: string, workspaceId: string): string {
@@ -143,9 +161,7 @@ export class DriveAuthService {
   }
 
   private getRedirectUri(): string {
-    if (this.googleRedirectUri) return this.googleRedirectUri;
-    const base = this.apiPublicUrl || `http://localhost:${this.port}`;
-    return `${base}/drive/callback`;
+    return this.driveOAuthRedirectUri;
   }
 
   private createOAuth2Client() {
