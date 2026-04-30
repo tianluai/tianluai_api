@@ -94,6 +94,14 @@ function parseOAuthCallbackState(raw: unknown): OAuthCallbackState | null {
   };
 }
 
+/** Trim and remove a trailing slash from env base URLs (`API_PUBLIC_URL`, `FRONTEND_URL`). */
+function normalizeBaseUrl(raw: string | undefined): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  return trimmed.replace(/\/+$/, '');
+}
+
 @Injectable()
 export class DriveAuthService {
   private readonly googleRedirectUri: string | undefined;
@@ -118,13 +126,16 @@ export class DriveAuthService {
     @InjectModel(WorkspaceDriveConnection.name)
     private readonly driveConnectionModel: Model<WorkspaceDriveConnection>,
   ) {
-    this.googleRedirectUri = config.get<string>('GOOGLE_REDIRECT_URI');
-    this.apiPublicUrl = config.get<string>('API_PUBLIC_URL');
+    this.googleRedirectUri = normalizeBaseUrl(
+      config.get<string>('GOOGLE_REDIRECT_URI'),
+    );
+    this.apiPublicUrl = normalizeBaseUrl(config.get<string>('API_PUBLIC_URL'));
     this.port = Number(config.get('PORT', 4000));
     this.googleClientId = config.get<string>('GOOGLE_CLIENT_ID');
     this.googleClientSecret = config.get<string>('GOOGLE_CLIENT_SECRET');
     this.frontendUrl =
-      config.get<string>('FRONTEND_URL') ?? 'http://localhost:3000';
+      normalizeBaseUrl(config.get<string>('FRONTEND_URL')) ??
+      'http://localhost:3000';
   }
 
   private scopeKey(userId: string, workspaceId: string): string {
